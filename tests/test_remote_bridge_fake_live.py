@@ -451,6 +451,28 @@ def test_resolve_get_children_and_call(monkeypatch):
     assert bridge._rpc_call({"ref": {"path": "live_set"}, "method": "get_beats_loop_start"}) == "1.1.1"
 
 
+def test_dispatch_normalizes_void_call_into_success_record(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    assert [device.name for device in song.tracks[0].devices] == ["Compressor"]
+
+    # delete_device returns None; the raw _rpc_call still returns None (so batch,
+    # which wraps each sub-op itself, is unaffected)...
+    assert bridge._rpc_call({"ref": {"path": "live_set tracks 0"}, "method": "delete_device", "args": [0]}) is None
+    song.tracks[0].devices.append(FakeDevice())
+
+    # ...but the top-level dispatch path coerces the void return into a JSON
+    # object so the MCP server never emits structuredContent: null.
+    response = bridge._dispatch({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "call",
+        "params": {"ref": {"path": "live_set tracks 0"}, "method": "delete_device", "args": [0]},
+    })
+    assert "error" not in response
+    assert response["result"] == {"ok": True, "result": None}
+    assert [device.name for device in song.tracks[0].devices] == []
+
+
 def test_agent_audio_tap_writes_file_command_by_default(monkeypatch):
     bridge, _song, _app = make_bridge(monkeypatch)
     sent = []
@@ -2199,6 +2221,52 @@ def test_browser_load_can_reresolve_stale_id_by_uri_or_path(monkeypatch):
 
     assert app.browser.loaded == ["505 Cowbell Hi.flac"]
     assert song.view.selected_track.name == "Track 1"
+
+
+def test_load_device_finds_and_loads_by_name(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    song.view.selected_track = None
+    result = bridge._rpc_load_device({
+        "name": "AgentAudioTap",
+        "target_track": {"path": "live_set tracks 0"},
+    })
+    assert result["loaded"] is True
+    assert result["item"]["name"] == "AgentAudioTap"
+    assert app.browser.loaded == ["AgentAudioTap"]
+    assert song.view.selected_track.name == "Track 1"
+
+
+def test_load_device_reports_candidates_when_ambiguous(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    result = bridge._rpc_load_device({"name": "AgentM4L", "name_exact": False})
+    assert result["loaded"] is False
+    assert result["ambiguous"] is True
+    names = sorted(candidate["name"] for candidate in result["candidates"])
+    assert names == ["AgentM4L_audio_effect_Wobble", "AgentM4L_instrument_Lead"]
+    assert app.browser.loaded == []
+
+
+def test_load_device_path_contains_disambiguates(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    result = bridge._rpc_load_device({
+        "name": "AgentM4L",
+        "name_exact": False,
+        "path_contains": "Instruments",
+        "target_track": {"path": "live_set tracks 0"},
+    })
+    assert result["loaded"] is True
+    assert app.browser.loaded == ["AgentM4L_instrument_Lead"]
+
+
+def test_load_device_raises_when_missing(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    try:
+        bridge._rpc_load_device({"name": "NoSuchDevice"})
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("expected KeyError for missing device")
+    assert app.browser.loaded == []
 
 
 def test_browser_capabilities_report_roots_and_semantic_attrs(monkeypatch):
