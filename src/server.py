@@ -50,7 +50,7 @@ AGENT_M4L_TOOL_DESCRIPTION = (
 AGENT_M4L_CLEANUP_DESCRIPTION = "Dry-run/delete AgentM4L; ask before delete."
 AGENT_AUDIO_TAP_DESCRIPTION = "AgentAudioTap: command open/start/stop/status; start with path; UDP optional."
 AGENT_AUDIO_TAP_SETUP_DESCRIPTION = "Load AgentAudioTap; solo target track; verify."
-VISUAL_CAPTURE_DESCRIPTION = "Ableton Live window-only; device-detail crop/downscale; region-rel; no arbitrary apps/windows."
+VISUAL_CAPTURE_DESCRIPTION = "Ableton Live window-only; device-detail crop/downscale; region-rel; no arbitrary apps/windows. macOS: embedded M4L jweb/jbrowser (WebView/CEF) device UIs capture via the default backend; if a capture reads back blank it auto-retries SCK then a window-cropped whole-display grab (the 'backend' field reports what was used; recovered_from_blank flags it). Force with backend='sck'."
 MAX_CONSOLE_CAPTURE_DESCRIPTION = "Read the Max Console (Max for Live runtime log) as an image to see Max-level errors/post() output that never reach a plugin's own logfile. Defaults to a window-isolated ScreenCaptureKit grab (macOS 14+) that reads the console's GPU-backed surface regardless of z-order — no setup needed. Alternatives: display=<n> (whole-display fallback; list_only=true enumerates displays), backend='quartz'/'screencapture' (legacy, returns black for the console). crop/downscale supported. Note: the live console window is owned by Live and titled 'Max for Live'."
 AGENT_AUDIO_TAP_SCHEMA = {
     "type": "object",

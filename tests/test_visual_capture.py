@@ -359,47 +359,50 @@ def test_visual_capture_cli_passes_crop_relative_to_region(monkeypatch, capsys):
     assert captured["max_height"] == 300
 
 
+def _macos_ableton_window(bounds=None):
+    return WindowInfo(
+        platform="Darwin",
+        id=100,
+        title="vibe-m4l",
+        owner="Live",
+        process_path="/Applications/Ableton Live Suite.app/Contents/MacOS/Live",
+        bundle_id="com.ableton.live",
+        bounds=bounds or {"x": 0, "y": 33, "width": 1200, "height": 800},
+    )
+
+
+def _raise(*_args, **_kwargs):
+    raise RuntimeError("fallback unavailable")
+
+
 def test_capture_blank_full_window_includes_validation_blocker(monkeypatch, tmp_path):
     Image = pytest.importorskip("PIL.Image")
-    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [
-        WindowInfo(
-            platform="Darwin",
-            id=100,
-            title="vibe-m4l",
-            owner="Live",
-            process_path="/Applications/Ableton Live Suite.app/Contents/MacOS/Live",
-            bundle_id="com.ableton.live",
-            bounds={"x": 0, "y": 33, "width": 1200, "height": 800},
-        )
-    ])
+    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [_macos_ableton_window()])
     monkeypatch.setattr(visual_capture, "capture_window", lambda _window, output, _backend: Image.new("RGB", (200, 100), "black").save(output) or "fake")
+    # The GPU-surface fallbacks are unavailable (e.g. CI / no Screen Recording),
+    # so a blank capture still surfaces the validation blocker.
+    monkeypatch.setattr(visual_capture, "capture_macos_window_sck", _raise)
+    monkeypatch.setattr(visual_capture, "capture_macos_window_display_crop", _raise)
 
     result = visual_capture.capture_ableton_window(output_path=tmp_path / "live.png")
 
     assert result["warning"] == "blank_capture"
     assert result["validation_blocker"] == "blank_capture_invalid"
     assert "restart the terminal" in result["permission_hint"]
+    assert "recovered_from_blank" not in result
 
 
 def test_capture_blank_result_includes_validation_blocker(monkeypatch, tmp_path):
     Image = pytest.importorskip("PIL.Image")
-    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [
-        WindowInfo(
-            platform="Darwin",
-            id=100,
-            title="vibe-m4l",
-            owner="Live",
-            process_path="/Applications/Ableton Live Suite.app/Contents/MacOS/Live",
-            bundle_id="com.ableton.live",
-            bounds={"x": 0, "y": 33, "width": 1200, "height": 800},
-        )
-    ])
+    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [_macos_ableton_window()])
 
     def fake_capture(_window, output, _backend):
         Image.new("RGB", (200, 100), "black").save(output)
         return "fake"
 
     monkeypatch.setattr(visual_capture, "capture_window", fake_capture)
+    monkeypatch.setattr(visual_capture, "capture_macos_window_sck", _raise)
+    monkeypatch.setattr(visual_capture, "capture_macos_window_display_crop", _raise)
 
     result = visual_capture.capture_ableton_window(output_path=tmp_path / "live.png", max_width=100)
 
@@ -407,6 +410,99 @@ def test_capture_blank_result_includes_validation_blocker(monkeypatch, tmp_path)
     assert result["validation_blocker"] == "blank_capture_invalid"
     assert result["next_action"] == "unlock_or_wake_display_before_visual_e2e"
     assert "Screen Recording permission" in result["permission_hint"]
+
+
+def test_blank_jweb_capture_recovers_via_sck(monkeypatch, tmp_path):
+    # The legacy default returns a blank capture (the jweb/WebView panel read
+    # black); the window-isolated SCK retry reads the GPU surface and recovers.
+    Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [_macos_ableton_window()])
+    monkeypatch.setattr(visual_capture, "capture_window", lambda _w, output, _b: Image.new("RGB", (200, 100), "black").save(output) or "screencapture")
+
+    def fake_sck(_window, output, *_a, **_k):
+        Image.new("RGB", (200, 100), "white").save(output)
+
+    crop_called = {"n": 0}
+
+    def fake_display_crop(_window, output):
+        crop_called["n"] += 1
+        Image.new("RGB", (200, 100), "white").save(output)
+        return "screencapture-display-crop"
+
+    monkeypatch.setattr(visual_capture, "capture_macos_window_sck", fake_sck)
+    monkeypatch.setattr(visual_capture, "capture_macos_window_display_crop", fake_display_crop)
+
+    result = visual_capture.capture_ableton_window(output_path=tmp_path / "live.png")
+
+    assert result["backend"] == "sck"
+    assert result["recovered_from_blank"] is True
+    assert result["postprocess"]["content"]["blank"] is False
+    assert "warning" not in result
+    assert crop_called["n"] == 0  # display crop not needed once SCK succeeds
+
+
+def test_blank_jweb_capture_falls_back_to_display_crop_when_sck_fails(monkeypatch, tmp_path):
+    # SCK can fail transiently (e.g. -3811 under GPU contention); the whole-display
+    # grab cropped to the window then recovers the jweb UI.
+    Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [_macos_ableton_window()])
+    monkeypatch.setattr(visual_capture, "capture_window", lambda _w, output, _b: Image.new("RGB", (200, 100), "black").save(output) or "screencapture")
+    monkeypatch.setattr(visual_capture, "capture_macos_window_sck", _raise)
+
+    def fake_display_crop(_window, output):
+        Image.new("RGB", (200, 100), "white").save(output)
+        return "screencapture-display-crop"
+
+    monkeypatch.setattr(visual_capture, "capture_macos_window_display_crop", fake_display_crop)
+
+    result = visual_capture.capture_ableton_window(output_path=tmp_path / "live.png", region="device-detail")
+
+    assert result["backend"] == "screencapture-display-crop"
+    assert result["recovered_from_blank"] is True
+    assert result["postprocess"]["content"]["blank"] is False
+    assert "warning" not in result
+
+
+def test_explicit_backend_does_not_trigger_blank_fallback(monkeypatch, tmp_path):
+    # A caller who forces a backend gets exactly that backend; the auto-only
+    # fallback must not silently switch backends on them.
+    Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [_macos_ableton_window()])
+    monkeypatch.setattr(visual_capture, "capture_window", lambda _w, output, _b: Image.new("RGB", (200, 100), "black").save(output) or "quartz")
+    monkeypatch.setattr(visual_capture, "capture_macos_window_sck", _raise)
+    monkeypatch.setattr(visual_capture, "capture_macos_window_display_crop", _raise)
+
+    result = visual_capture.capture_ableton_window(output_path=tmp_path / "live.png", backend="quartz")
+
+    assert result["backend"] == "quartz"
+    assert "recovered_from_blank" not in result
+    assert result["warning"] == "blank_capture"
+
+
+def test_display_crop_crops_whole_display_to_window_bounds(monkeypatch, tmp_path):
+    # The display-crop fallback writes only the Ableton window rectangle to disk,
+    # scaling for retina (the captured display image is 2x the display points).
+    Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(visual_capture, "list_macos_displays", lambda: [
+        {"screencapture_index": 2, "display_id": 5, "is_main": False,
+         "width": 1500, "height": 1000, "origin": {"x": -100, "y": -200}},
+    ])
+
+    def fake_display_capture(index, output):
+        assert index == 2
+        Image.new("RGB", (3000, 2000), "black").save(output)  # 2x retina of the display
+        return "screencapture-display"
+
+    monkeypatch.setattr(visual_capture, "capture_macos_display", fake_display_capture)
+    window = _macos_ableton_window(bounds={"x": 100, "y": 50, "width": 400, "height": 300})
+    out = tmp_path / "crop.png"
+
+    label = visual_capture.capture_macos_window_display_crop(window, out)
+
+    assert label == "screencapture-display-crop"
+    with Image.open(out) as image:
+        # (x-origin)*scale = (100-(-100))*2 = 400 .. +400*2 = 800 wide; 300*2 = 600 tall
+        assert image.size == [800, 600] or image.size == (800, 600)
 
 
 def test_image_content_stats_detects_nonblank_capture():

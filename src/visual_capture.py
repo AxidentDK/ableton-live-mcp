@@ -147,6 +147,32 @@ def capture_ableton_window(
         "window": window_result(window),
         "postprocess": postprocess,
     }
+    # Embedded GPU/IOSurface-backed device UIs — notably Max for Live jweb/jbrowser
+    # (WebView/CEF) panels — can read back blank through the legacy per-window
+    # snapshot APIs on some macOS versions, while the Max device chrome around them
+    # captures fine. When the caller didn't force a backend, recover automatically
+    # with backends that read GPU surfaces: window-isolated ScreenCaptureKit, then
+    # a whole-display grab cropped to the Ableton window. This preserves the fast
+    # default for ordinary captures and keeps the Ableton-only capture boundary
+    # (only the window rectangle is written to disk).
+    if (
+        postprocess.get("content", {}).get("blank")
+        and backend == "auto"
+        and window.platform == "Darwin"
+    ):
+        recovered = recover_blank_macos_capture(
+            window, output, region, crop, crop_relative_to_region, bottom_fraction, max_width, max_height
+        )
+        if recovered is not None:
+            backend_used, postprocess = recovered
+            result["backend"] = backend_used
+            result["postprocess"] = postprocess
+            result["recovered_from_blank"] = True
+            result["hint"] = (
+                "Initial auto capture was blank; embedded M4L jweb/WebView UIs can read black "
+                "through the legacy window snapshot on some macOS versions, so this was recaptured "
+                "with the '%s' backend." % backend_used
+            )
     if postprocess.get("content", {}).get("blank"):
         result.update(blank_capture_guidance())
     return result
@@ -493,6 +519,106 @@ def capture_macos_window_sck(window: WindowInfo, output: Path, scale: int = 2) -
     if image is None:
         raise RuntimeError("ScreenCaptureKit returned no image")
     write_cgimage_png(image, output)
+
+
+def macos_display_for_window(window: WindowInfo) -> dict[str, Any] | None:
+    bounds = window.bounds or {}
+    if not bounds:
+        return None
+    x = int(bounds.get("x") or 0)
+    y = int(bounds.get("y") or 0)
+    width = max(1, int(bounds.get("width") or 1))
+    height = max(1, int(bounds.get("height") or 1))
+    center_x = x + width // 2
+    center_y = y + height // 2
+    displays = list_macos_displays()
+
+    def contains(display: dict[str, Any], px: int, py: int) -> bool:
+        ox = int(display["origin"]["x"])
+        oy = int(display["origin"]["y"])
+        return ox <= px < ox + int(display["width"]) and oy <= py < oy + int(display["height"])
+
+    for display in displays:
+        if contains(display, center_x, center_y):
+            return display
+    for display in displays:
+        if contains(display, x, y):
+            return display
+    return None
+
+
+def capture_macos_window_display_crop(window: WindowInfo, output: Path) -> str:
+    # Whole-display grab cropped to the window's bounds. The display compositor
+    # always includes out-of-process GPU/IOSurface layers (e.g. M4L jweb/WebView
+    # panels) that a per-window snapshot can miss on some macOS versions. Only the
+    # Ableton window rectangle is written to disk, so the Ableton-only capture
+    # boundary is preserved even though the source frame is a whole display.
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("display-crop fallback requires the Pillow package") from exc
+    bounds = window.bounds or {}
+    if not bounds:
+        raise RuntimeError("window has no bounds for a display-crop capture")
+    display = macos_display_for_window(window)
+    if display is None:
+        raise RuntimeError("could not match the Ableton Live window to a display for a display-crop capture")
+    capture_macos_display(int(display["screencapture_index"]), output)
+    with Image.open(output) as image:
+        display_width = max(1, int(display["width"]))
+        display_height = max(1, int(display["height"]))
+        scale_x = image.width / display_width
+        scale_y = image.height / display_height
+        origin_x = int(display["origin"]["x"])
+        origin_y = int(display["origin"]["y"])
+        left = int(round((int(bounds["x"]) - origin_x) * scale_x))
+        top = int(round((int(bounds["y"]) - origin_y) * scale_y))
+        right = int(round(left + int(bounds["width"]) * scale_x))
+        bottom = int(round(top + int(bounds["height"]) * scale_y))
+        left = clamp_int(left, 0, image.width)
+        right = clamp_int(right, 0, image.width)
+        top = clamp_int(top, 0, image.height)
+        bottom = clamp_int(bottom, 0, image.height)
+        if right <= left or bottom <= top:
+            raise RuntimeError("window bounds fall outside the captured display")
+        cropped = image.crop((left, top, right, bottom))
+        cropped.load()
+    cropped.save(output, format="PNG")
+    return "screencapture-display-crop"
+
+
+def recover_blank_macos_capture(
+    window: WindowInfo,
+    output: Path,
+    region: str | None,
+    crop: Any,
+    crop_relative_to_region: bool,
+    bottom_fraction: float | None,
+    max_width: int | None,
+    max_height: int | None,
+) -> tuple[str, dict[str, Any]] | None:
+    # Retry a blank macOS capture with backends that read GPU/IOSurface-backed
+    # window content (M4L jweb/WebView panels): window-isolated ScreenCaptureKit
+    # first (no other windows in frame), then a whole-display grab cropped to the
+    # window. SCK can fail transiently on some machines (e.g. -3811 under GPU
+    # contention), so its failure falls through to the display crop rather than
+    # aborting. Returns (backend_label, postprocess) for the first non-blank
+    # result, or None if every fallback is unavailable or still blank.
+    attempts = (
+        ("sck", lambda: capture_macos_window_sck(window, output)),
+        ("screencapture-display-crop", lambda: capture_macos_window_display_crop(window, output)),
+    )
+    for label, capture in attempts:
+        try:
+            capture()
+        except Exception:
+            continue
+        postprocess = postprocess_capture(
+            output, region, crop, crop_relative_to_region, bottom_fraction, max_width, max_height
+        )
+        if not postprocess.get("content", {}).get("blank"):
+            return label, postprocess
+    return None
 
 
 def list_windows_windows() -> list[WindowInfo]:
