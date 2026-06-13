@@ -25,7 +25,7 @@ DEFAULT_CHILD_LIMIT = 200
 DEFAULT_MAIN_THREAD_TIMEOUT = 30
 DEFAULT_MAIN_THREAD_STALL_COOLDOWN = 10
 DEFAULT_BROWSER_ROOTS = ("instruments", "audio_effects", "midi_effects", "drums", "samples", "sounds", "packs", "plugins", "user_library", "user_folders", "current_project")
-REMOTE_SCRIPT_RUNTIME_VERSION = "transport-stop-settle-1"
+REMOTE_SCRIPT_RUNTIME_VERSION = "transport-play-from-1"
 AGENT_AUDIO_TAP_HOST = "127.0.0.1"
 AGENT_AUDIO_TAP_PORT = 17654
 AGENT_M4L_HOST = "127.0.0.1"
@@ -557,6 +557,131 @@ class AbletonLiveMCP(ControlSurface):
             "playing": bool(getattr(song, "is_playing", False)),
         }
 
+    def _rpc_record_track_to_wav(self, params):
+        # Layer-2 turnkey: solo a track, load the master AgentAudioTap, position
+        # arrangement playback over a region, and start a self-terminating tap
+        # capture that auto-finalizes the WAV. Composes the existing primitives
+        # (agent_audio_tap_setup + the play_from/play_loop deferred-jump transport
+        # + the agent_audio_tap duration_ms/bars record cap) so the whole record
+        # is one main-thread orchestration with no socket round-trips.
+        #
+        # Ordering (all on Live's main thread): setup (solo + stop) runs first, then
+        # we POSITION playback over the region on a deferred tick (so the jump lands
+        # after the transport engages), and only AFTER the playhead has landed do we
+        # start the tap with the duration cap. The cap lets the recording self-stop
+        # and finalize — no transport-watch / unreliable stop needed.
+        path = params.get("path")
+        if not path:
+            raise ValueError("path is required (output .wav)")
+
+        song = self.song()
+
+        # 1) Region + capture duration. region_start/region_length define the
+        #    arrangement window; record_bars/duration_ms set how long to record.
+        region_start = params.get("region_start")
+        if region_start is None:
+            region_start = float(getattr(song, "current_song_time", 0.0))
+        region_start = float(region_start)
+        region_length = params.get("region_length")
+
+        loop = bool(params.get("loop", region_length is not None))
+        # Repeats only meaningful when looping a finite region; default 1 lap.
+        repeats = params.get("repeats")
+
+        # Capture length precedence: explicit duration_ms/record_bars win; else
+        # derive from region_length * repeats (one lap if repeats unset).
+        tap_duration_params = {}
+        if params.get("duration_ms") is not None:
+            tap_duration_params["duration_ms"] = params.get("duration_ms")
+        elif params.get("record_bars") is not None:
+            tap_duration_params["bars"] = params.get("record_bars")
+        elif region_length is not None:
+            laps = float(repeats) if repeats is not None else 1.0
+            if laps <= 0:
+                raise ValueError("repeats must be positive")
+            tempo = self._agent_audio_tap_tempo_meter()[0]
+            # region_length is in beats (quarter notes). Beats are quarter notes, so
+            # ms = beats * (60000/tempo) * laps.
+            total_beats = float(region_length) * laps
+            tap_duration_params["duration_ms"] = total_beats * (60000.0 / float(tempo))
+        else:
+            raise ValueError("record duration unresolved: provide duration_ms, record_bars, or region_length")
+
+        # 2) Setup: load master tap, solo the target track, stop transport. Reuse
+        #    the existing setup RPC verbatim (placement defaults to master).
+        setup_result = self._rpc_agent_audio_tap_setup({
+            "placement": params.get("placement", "master"),
+            "solo_track": params.get("solo_track") or params.get("target_track"),
+            "exclusive_solo": params.get("exclusive_solo", True),
+            "remove_existing": params.get("remove_existing", False),
+            "stop": True,
+        })
+
+        # 3) Open the tap on the WAV path now (so the [js] has the file ready), but
+        #    DON'T start recording yet — recording begins after playback lands.
+        open_result = self._rpc_agent_audio_tap({
+            "command": "open",
+            "path": path,
+            "udp": params.get("udp", False),
+        })
+
+        # 4) Position playback (deferred-jump), then start the capped tap on a
+        #    further tick once the playhead has landed at the region.
+        if loop and region_length is not None:
+            song.loop_start = region_start
+            song.loop_length = float(region_length)
+            song.loop = True
+        self._start_transport(song)
+
+        start_tap_params = dict(tap_duration_params)
+        start_tap_params.update({
+            "command": "start",
+            "path": path,
+            "udp": params.get("udp", False),
+        })
+
+        def position_then_record():
+            try:
+                playing = bool(getattr(song, "is_playing", False))
+                if not playing:
+                    self._start_transport(song)
+                    self.schedule_message(0, position_then_record)
+                    return
+                self._seek_song(song, region_start)
+                # Land on the region first; start the tap on the NEXT tick so the
+                # first recorded sample is at/after region_start.
+                self.schedule_message(0, lambda: self._safe_start_tap(start_tap_params))
+            except Exception:
+                try:
+                    self.log_message("record_track_to_wav positioning failed")
+                except Exception:
+                    pass
+
+        self.schedule_message(0, position_then_record)
+
+        return {
+            "path": path,
+            "region_start": region_start,
+            "region_length": float(region_length) if region_length is not None else None,
+            "loop": loop and region_length is not None,
+            "duration_ms": tap_duration_params.get("duration_ms"),
+            "record_bars": tap_duration_params.get("bars"),
+            "deferred_record": True,
+            "setup": setup_result,
+            "opened": open_result,
+            "playing": bool(getattr(song, "is_playing", False)),
+            "note": "Recording is deferred: playback positions then the tap self-terminates after the duration cap and finalizes the WAV. Poll the tap status / check the file to confirm completion.",
+        }
+
+    def _safe_start_tap(self, start_tap_params):
+        try:
+            self._rpc_agent_audio_tap(start_tap_params)
+        except Exception:
+            try:
+                self.log_message("record_track_to_wav tap start failed")
+            except Exception:
+                pass
+
     def _rpc_agent_m4l_device(self, params):
         instance_id = self._agent_m4l_slug(params.get("instance_id") or params.get("name") or "device")
         role = self._agent_m4l_role(params.get("role"))
@@ -883,9 +1008,13 @@ class AbletonLiveMCP(ControlSurface):
 
     def _rpc_transport(self, params):
         song = self.song()
-        if params.get("time") is not None:
-            self._seek_song(song, float(params["time"]))
         action = params.get("action")
+        # play_from / play_loop own their own (deferred-tick) positioning; a
+        # top-level seek here would be a stopped jump_by (ignored by real Live)
+        # AND would skew the deferred jump's delta math. Only seek for the
+        # stationary actions.
+        if params.get("time") is not None and action not in ("play_from", "play_loop"):
+            self._seek_song(song, float(params["time"]))
         if action == "play":
             self._start_transport(song)
         elif action == "continue":
@@ -894,9 +1023,103 @@ class AbletonLiveMCP(ControlSurface):
                 self._start_transport(song)
         elif action == "stop":
             self._stop_transport(song)
+        elif action == "play_from":
+            return self._play_from(song, params)
+        elif action == "play_loop":
+            return self._play_loop(song, params)
         elif action not in (None, "status"):
-            raise ValueError("action must be play, continue, stop, or status")
+            raise ValueError("action must be play, continue, stop, status, play_from, or play_loop")
         return self._transport_result(song, action)
+
+    def _play_from(self, song, params):
+        # Reliable "play from arrangement beat X". jump_by repositions the
+        # arrangement playhead ONLY while playback is genuinely running (verified
+        # in Live 12.4.1, 2026-06-13): setting current_song_time while stopped is
+        # ignored by start_playing/continue_playing, and a same-tick
+        # start_playing()+jump_by() fails because the jump fires before playback
+        # engages. So: start playback synchronously, then run the jump on a LATER
+        # main-thread tick via schedule_message (the same scheduler _run_on_main
+        # uses). We must NOT time.sleep to "wait a tick" — sleeping blocks Live's
+        # main thread and the transport never advances.
+        target = params.get("time")
+        if target is None:
+            raise ValueError("play_from requires a time (arrangement beats)")
+        target = float(target)
+        self._start_transport(song)
+        self._schedule_deferred_jump_to(song, target, params)
+        result = self._transport_result(song, "play")
+        result["action"] = "play_from"
+        result["target_time"] = target
+        result["deferred_jump"] = True
+        return result
+
+    def _play_loop(self, song, params):
+        # Set the arrangement loop brace, enable looping, start playing, then jump
+        # INTO the brace on a later tick (same deferred-jump rule as play_from).
+        # Once the playhead is inside [loop_start, loop_start+loop_length) and
+        # song.loop is on, Live cycles that region (verified 2026-06-13). For
+        # deterministic N-repeat capture, pair with the audio tap's duration_ms /
+        # bars self-terminating cap rather than counting laps here.
+        loop_start = params.get("loop_start")
+        loop_length = params.get("loop_length")
+        if loop_start is None or loop_length is None:
+            raise ValueError("play_loop requires loop_start and loop_length (arrangement beats)")
+        loop_start = float(loop_start)
+        loop_length = float(loop_length)
+        if loop_length <= 0:
+            raise ValueError("loop_length must be positive")
+        # Order matters: widen/relocate the brace before flipping loop on so the
+        # current playhead doesn't transiently fall outside a stale brace.
+        song.loop_start = loop_start
+        song.loop_length = loop_length
+        song.loop = True
+        # Land just inside the brace; an optional offset auditions partway in.
+        offset = params.get("offset")
+        target = loop_start + (float(offset) if offset is not None else 0.0)
+        if not (loop_start <= target < loop_start + loop_length):
+            target = loop_start
+        self._start_transport(song)
+        self._schedule_deferred_jump_to(song, target, params)
+        result = self._transport_result(song, "play")
+        result["action"] = "play_loop"
+        result["loop_start"] = loop_start
+        result["loop_length"] = loop_length
+        result["target_time"] = target
+        result["deferred_jump"] = True
+        return result
+
+    def _schedule_deferred_jump_to(self, song, target, params):
+        # Defer jump_by(target - current) to a subsequent main-thread tick so it
+        # runs AFTER start_playing() has actually engaged the transport. Bounded
+        # retries: if the transport hasn't begun advancing yet on the first
+        # deferred tick, re-defer a few times rather than jumping into a still-
+        # stopped transport (where the jump would be ignored). All work happens on
+        # Live's main thread inside schedule_message; never raise out of it.
+        try:
+            max_attempts = int(params.get("jump_attempts", 4))
+        except (TypeError, ValueError):
+            max_attempts = 4
+        if max_attempts < 1:
+            max_attempts = 1
+        state = {"attempts": 0}
+
+        def do_jump():
+            try:
+                state["attempts"] += 1
+                playing = bool(getattr(song, "is_playing", False))
+                if not playing and state["attempts"] < max_attempts:
+                    # Transport not yet running; nudge it and try again next tick.
+                    self._start_transport(song)
+                    self.schedule_message(0, do_jump)
+                    return
+                self._seek_song(song, float(target))
+            except Exception:
+                try:
+                    self.log_message("play_from deferred jump failed")
+                except Exception:
+                    pass
+
+        self.schedule_message(0, do_jump)
 
     def _osc_message(self, address, args):
         def pad(value):
