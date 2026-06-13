@@ -5,10 +5,12 @@ outlets = 3;
 var isRecording = false;
 var lastPath = "";
 var lastDurationMs = 0;
+var pendingDurationMs = 0;   // stash for the deferred start (Task.arguments proved unreliable in M4L [js])
 var commandFile = jsarguments.length > 1 ? String(jsarguments[1]) : "agent_audio_tap_command.json";
 var lastCommandId = "";
 var pollTask = null;
 var startTask = null;
+var stopTask = null;
 
 function loadbang() {
     start_polling();
@@ -133,13 +135,16 @@ function scheduleStartRecording(durationMs) {
     // sfrecord~ finalizes/closes the file when a "record <ms>" auto-stop fires,
     // and a fresh "open" is required before the next capture. openPath already
     // re-opened above, so carry the duration through to the deferred start.
-    startTask.arguments = [durationMs];
+    // Stash it in a module var rather than Task.arguments: in Live's [js] the
+    // Task.arguments did NOT survive the 500ms deferral (the callback saw 0, so
+    // startRecording fell through to the continuous outlet(0,1) and the WAV
+    // recorded forever — caught by an in-Live record_track_to_wav test 2026-06-13).
+    pendingDurationMs = normalizeDuration(durationMs);
     startTask.schedule(500);
 }
 
 function deferredStart() {
-    // Task callbacks receive the Task's `arguments` as call arguments.
-    startRecording(arguments.length ? arguments[0] : 0);
+    startRecording(pendingDurationMs);
 }
 
 function openPath(path) {
@@ -159,22 +164,32 @@ function startRecording(durationMs) {
     }
     lastDurationMs = normalizeDuration(durationMs);
     isRecording = true;
+    // Start recording continuously, then (for a capped capture) schedule an
+    // explicit stop after lastDurationMs. We deliberately do NOT use sfrecord~'s
+    // "record <ms>" self-terminate: despite the Max docs it does NOT auto-stop in
+    // Live 12.4.1 (verified 2026-06-13 — it recorded continuously for 150s+). The
+    // explicit 0 reliably stops AND finalizes the WAV header (also verified), and
+    // Task.schedule timing is reliable (only Task.arguments wasn't), so a
+    // [js]-scheduled stop is the robust cap.
+    if (stopTask) { stopTask.cancel(); }
+    outlet(0, 1);
     if (lastDurationMs > 0) {
-        // "record <ms>": sfrecord~ records for exactly lastDurationMs then
-        // auto-stops AND finalizes/closes the file — a deterministic, self-
-        // terminating capture (no unreliable stop, no ballooning WAV). Do NOT
-        // also send a trailing 0; that would double-finalize. The next capture
-        // re-opens via the start command's path (openPath -> scheduleStart).
-        outlet(0, "record", lastDurationMs);
-    } else {
-        // Fallback: continuous recording until an explicit stop (the legacy
-        // behavior, kept for callers that don't supply a duration).
-        outlet(0, 1);
+        if (!stopTask) { stopTask = new Task(timedStop, this); }
+        stopTask.schedule(lastDurationMs);
     }
     report("start");
 }
 
+function timedStop() {
+    // The duration cap fired: stop + finalize the file (same path as an explicit
+    // stop, which is what actually finalizes the WAV header).
+    isRecording = false;
+    outlet(0, 0);
+    report("stop");
+}
+
 function stopRecording() {
+    if (stopTask) { stopTask.cancel(); }
     isRecording = false;
     lastDurationMs = 0;
     outlet(0, 0);
