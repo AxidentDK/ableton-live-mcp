@@ -1,3 +1,20 @@
+> ## Maintained fork (Rubato Audio)
+>
+> A community-maintained distribution of **[bschoepke/ableton-live-mcp](https://github.com/bschoepke/ableton-live-mcp)** — all credit for the original goes to [@bschoepke](https://github.com/bschoepke). MIT-licensed, same as upstream. It tracks upstream and ships additional **reviewed** capabilities ahead of their merge there; every change here is also offered back as an upstream PR.
+>
+> **Added here, beyond upstream:**
+> - **Works in strict MCP clients** (Claude Code, etc.) — valid tool schemas + a registration guard (upstream only tested in Codex)
+> - **`live_load_device`** — load any device/preset by name onto a track
+> - **Max Console capture** (ScreenCaptureKit) + blank-capture auto-recovery for jweb/M4L device UIs
+> - **OCR on captures** (macOS, Apple Vision) — read Max-console errors and UI labels back as text
+> - **Reliable arrangement positioning** — `play_from` / `play_loop` — plus a turnkey **`live_record_track_to_wav`**
+> - **Self-terminating audio-tap** capture (deterministic, finalized WAVs)
+> - `structuredContent` normalization for void / non-object tool returns
+>
+> Maintained by Lyle Mills (Rubato Audio). Issues and PRs welcome — see the commit history for the full set of changes.
+>
+> ---
+
 Ever wanted to control Ableton with just your voice? Me too! I made this MCP server so I could just ask Codex to do anything in Ableton Live for me, while I was nap-trapped by my baby.
 
 Unlike other Ableton MCPs I tried, this one can do pretty much anything that is possible via Ableton's Object model; the agent can just eval arbitrary python that runs inside Ableton. It also has some tools defined for common tasks so those work faster and more reliably. I had Codex CLI optimize this for hours with the new `/goal` command to prioritize low end-to-end latency, high reliability, low token usage, while maintaining full flexibility.
@@ -8,7 +25,7 @@ Things you can use it for: create MIDI clips, insert audio files, general Ableto
 
 Just tell your AI agent (Codex, Claude Code, Cursor, Copilot, Gemini, etc.) to:
 
-`Set up the https://github.com/bschoepke/ableton-live-mcp MCP server for me`
+`Set up the https://github.com/lylepmills/ableton-live-mcp MCP server for me`
 
 It should work on Mac and Windows with recent Ableton versions, but I have only tested it on Ableton Live Suite 12.3.8 on macOS Tahoe.
 
@@ -18,7 +35,7 @@ Back up your Live Set before using this. The MCP can edit your set directly and 
 
 `git pull` this repo or ask your agent to:
 
-`Update the https://github.com/bschoepke/ableton-live-mcp MCP server for me`
+`Update the https://github.com/lylepmills/ableton-live-mcp MCP server for me`
 
 ## Demos
 Here are a couple examples of live sets made from scratch with Codex in just a few minutes, along with their prompts. After it makes something, you can ask for follow up changes.
