@@ -372,6 +372,9 @@ class FakeSong:
         self.master_track = FakeTrack("Main")
         self.view = types.SimpleNamespace(selected_track=None)
         self.is_playing = False
+        self.loop = False
+        self.loop_start = 0.0
+        self.loop_length = 4.0
 
     def get_beats_loop_start(self):
         return "1.1.1"
@@ -1506,6 +1509,282 @@ def test_transport_play_reports_requested_state_when_live_property_lags(monkeypa
     assert calls == ["start", "continue", "start"]
 
 
+# --- play_from / play_loop ---------------------------------------------------
+#
+# NOTE: the deferred-tick behavior is the load-bearing real-Live property and
+# CANNOT be exercised offline — the fake ControlSurface.schedule_message runs
+# the callback synchronously, so these tests assert the PLUMBING (start_playing
+# ordering, the jump target, the deferred markers, loop-brace writes, param
+# validation). The actual "jump only lands once the transport is genuinely
+# running on a later tick" rule is an in-Live check (see the verification
+# checklist in the commit / PR notes).
+
+
+def test_transport_play_from_starts_then_jumps_to_target(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    calls = []
+    song.current_song_time = 167.0
+    real_start = song.start_playing
+
+    def start():
+        calls.append("start")
+        real_start()
+
+    song.start_playing = start
+    song.jump_by = lambda offset: calls.append(("jump_by", offset)) or setattr(
+        song, "current_song_time", song.current_song_time + offset
+    )
+
+    result = bridge._rpc_transport({"action": "play_from", "time": 300.0})
+
+    # Started, then (synchronously, since the fake scheduler is inline) jumped by
+    # the delta from the live playhead to the target.
+    assert calls[0] == "start"
+    assert ("jump_by", 133.0) in calls
+    assert result["action"] == "play_from"
+    assert result["target_time"] == 300.0
+    assert result["deferred_jump"] is True
+    assert result["playing"] is True
+    assert song.current_song_time == 300.0
+
+
+def test_transport_play_from_requires_time(monkeypatch):
+    bridge, _song, _app = make_bridge(monkeypatch)
+    import pytest
+
+    with pytest.raises(ValueError, match="play_from requires a time"):
+        bridge._rpc_transport({"action": "play_from"})
+
+
+def test_transport_play_from_retries_jump_until_transport_engages(monkeypatch):
+    # If the transport isn't running on the first deferred tick, the jump must
+    # re-defer (and re-nudge start) rather than jump into a stopped transport.
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.current_song_time = 10.0
+    engage_after = {"ticks": 2}
+    starts = {"count": 0}
+    jumps = []
+
+    def start():
+        starts["count"] += 1
+        if starts["count"] > engage_after["ticks"]:
+            song.is_playing = True
+
+    song.start_playing = start
+    song.jump_by = lambda offset: jumps.append(offset) or setattr(
+        song, "current_song_time", song.current_song_time + offset
+    )
+
+    result = bridge._rpc_transport({"action": "play_from", "time": 50.0, "jump_attempts": 6})
+
+    # Jump only fired once the transport engaged, and landed on target.
+    assert jumps == [40.0]
+    assert song.current_song_time == 50.0
+    assert result["deferred_jump"] is True
+
+
+def test_transport_play_loop_sets_brace_and_jumps_in(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.current_song_time = 0.0
+    jumps = []
+    song.jump_by = lambda offset: jumps.append(offset) or setattr(
+        song, "current_song_time", song.current_song_time + offset
+    )
+
+    result = bridge._rpc_transport({
+        "action": "play_loop",
+        "loop_start": 240.0,
+        "loop_length": 8.0,
+    })
+
+    assert song.loop_start == 240.0
+    assert song.loop_length == 8.0
+    assert song.loop is True
+    assert result["action"] == "play_loop"
+    assert result["loop_start"] == 240.0
+    assert result["loop_length"] == 8.0
+    assert result["target_time"] == 240.0
+    assert result["deferred_jump"] is True
+    # Landed inside the brace.
+    assert 240.0 <= song.current_song_time < 248.0
+
+
+def test_transport_play_loop_honors_offset_into_brace(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.current_song_time = 0.0
+    song.jump_by = lambda offset: setattr(
+        song, "current_song_time", song.current_song_time + offset
+    )
+
+    result = bridge._rpc_transport({
+        "action": "play_loop",
+        "loop_start": 100.0,
+        "loop_length": 16.0,
+        "offset": 4.0,
+    })
+
+    assert result["target_time"] == 104.0
+    assert song.current_song_time == 104.0
+
+    # An out-of-range offset falls back to loop_start.
+    song.current_song_time = 0.0
+    result2 = bridge._rpc_transport({
+        "action": "play_loop",
+        "loop_start": 100.0,
+        "loop_length": 16.0,
+        "offset": 99.0,
+    })
+    assert result2["target_time"] == 100.0
+
+
+def test_transport_play_loop_validates_params(monkeypatch):
+    bridge, _song, _app = make_bridge(monkeypatch)
+    import pytest
+
+    with pytest.raises(ValueError, match="play_loop requires loop_start and loop_length"):
+        bridge._rpc_transport({"action": "play_loop", "loop_start": 0.0})
+    with pytest.raises(ValueError, match="loop_length must be positive"):
+        bridge._rpc_transport({"action": "play_loop", "loop_start": 0.0, "loop_length": 0})
+
+
+def test_transport_unknown_action_lists_new_actions(monkeypatch):
+    bridge, _song, _app = make_bridge(monkeypatch)
+    import pytest
+
+    with pytest.raises(ValueError, match="play_from"):
+        bridge._rpc_transport({"action": "rewind"})
+
+
+# --- record_track_to_wav (Layer-2 turnkey) -----------------------------------
+
+
+def _install_tap_capture(bridge, monkeypatch):
+    # Capture agent_audio_tap payloads written to the command file so we can
+    # assert the record cap composes through record_track_to_wav.
+    written = []
+
+    class FakeFile:
+        def __init__(self, path, mode):
+            self.value = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            try:
+                written.append(json.loads(self.value))
+            except ValueError:
+                pass
+            return False
+
+        def write(self, value):
+            self.value += value
+            return len(value)
+
+    module = load_bridge_module(monkeypatch)[0]
+    monkeypatch.setattr(module, "open", lambda path, mode: FakeFile(path, mode), raising=False)
+    bridge.__class__ = module.AbletonLiveMCP
+    return written
+
+
+def test_record_track_to_wav_composes_setup_position_and_capped_tap(monkeypatch):
+    bridge, song, app = make_bridge(monkeypatch)
+    # Put an AgentAudioTap on master so setup finds it loaded.
+    song.master_track.devices.append(FakeDevice())
+    song.master_track.devices[-1].name = "AgentAudioTap"
+    song.tempo = 120.0
+    song.signature_numerator = 4
+    song.signature_denominator = 4
+    song.current_song_time = 0.0
+    song.jump_by = lambda offset: setattr(
+        song, "current_song_time", song.current_song_time + offset
+    )
+    written = _install_tap_capture(bridge, monkeypatch)
+
+    result = bridge._rpc_record_track_to_wav({
+        "path": "/tmp/take.wav",
+        "target_track": {"path": "live_set tracks 0"},
+        "region_start": 16.0,
+        "region_length": 8.0,  # 8 beats @120 = 4000 ms for one lap
+    })
+
+    assert result["path"] == "/tmp/take.wav"
+    assert result["region_start"] == 16.0
+    assert result["region_length"] == 8.0
+    assert result["loop"] is True
+    assert result["deferred_record"] is True
+    # 8 beats @ 120 BPM = 8 * 500 ms = 4000 ms.
+    assert result["duration_ms"] == 4000.0
+    # The target track was soloed exclusively.
+    assert [track.solo for track in song.tracks] == [True, False]
+    # Loop brace set to the region.
+    assert song.loop_start == 16.0
+    assert song.loop_length == 8.0
+    assert song.loop is True
+    # Playback positioned at the region (deferred jump ran inline in the fake).
+    assert song.current_song_time == 16.0
+    # An open then a capped start were written to the tap command file.
+    commands = [(p["command"], p.get("duration_ms")) for p in written]
+    assert ("open", None) in commands
+    assert ("start", 4000.0) in commands
+
+
+def test_record_track_to_wav_repeats_multiply_region_duration(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.master_track.devices.append(FakeDevice())
+    song.master_track.devices[-1].name = "AgentAudioTap"
+    song.tempo = 120.0
+    song.signature_numerator = 4
+    song.signature_denominator = 4
+    song.jump_by = lambda offset: None
+    _install_tap_capture(bridge, monkeypatch)
+
+    result = bridge._rpc_record_track_to_wav({
+        "path": "/tmp/take.wav",
+        "target_track": {"path": "live_set tracks 0"},
+        "region_start": 0.0,
+        "region_length": 4.0,  # 4 beats = 2000 ms per lap
+        "repeats": 3,
+    })
+
+    assert result["duration_ms"] == 6000.0  # 3 laps
+
+
+def test_record_track_to_wav_explicit_duration_wins(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.master_track.devices.append(FakeDevice())
+    song.master_track.devices[-1].name = "AgentAudioTap"
+    song.jump_by = lambda offset: None
+    _install_tap_capture(bridge, monkeypatch)
+
+    result = bridge._rpc_record_track_to_wav({
+        "path": "/tmp/take.wav",
+        "target_track": {"path": "live_set tracks 0"},
+        "region_start": 0.0,
+        "region_length": 4.0,
+        "duration_ms": 1234.0,
+    })
+
+    assert result["duration_ms"] == 1234.0
+
+
+def test_record_track_to_wav_requires_path_and_a_duration_source(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    song.master_track.devices.append(FakeDevice())
+    song.master_track.devices[-1].name = "AgentAudioTap"
+    _install_tap_capture(bridge, monkeypatch)
+    import pytest
+
+    with pytest.raises(ValueError, match="path is required"):
+        bridge._rpc_record_track_to_wav({"target_track": {"path": "live_set tracks 0"}})
+    with pytest.raises(ValueError, match="record duration unresolved"):
+        bridge._rpc_record_track_to_wav({
+            "path": "/tmp/take.wav",
+            "target_track": {"path": "live_set tracks 0"},
+            # no region_length / duration_ms / record_bars
+        })
+
+
 def test_set_summary_compacts_existing_project_state(monkeypatch):
     bridge, _song, _app = make_bridge(monkeypatch)
     result = bridge._rpc_set_summary({"track_limit": 1, "clip_slot_limit": 1, "device_limit": 1, "arrangement_clip_limit": 1})
@@ -2002,7 +2281,7 @@ def test_ping_reports_running_remote_script_hash(monkeypatch):
     assert result["ok"] is True
     assert result["remote_script"]["path"].endswith("bridge.py")
     assert len(result["remote_script"]["bridge_sha256"]) == 64
-    assert result["remote_script"]["runtime_version"] == "transport-stop-settle-1"
+    assert result["remote_script"]["runtime_version"] == "transport-play-from-1"
     assert len(result["remote_script"]["runtime_code_sha256"]) == 64
     assert result["remote_script"]["runtime_code_sha256"] == remote_script_status()["source_runtime_code_sha256"]
 

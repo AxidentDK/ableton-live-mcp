@@ -59,6 +59,7 @@ def test_lists_general_purpose_tools():
         "live_track_insert_device",
         "live_agent_audio_tap",
         "live_agent_audio_tap_setup",
+        "live_record_track_to_wav",
         "live_visual_capture",
         "live_agent_m4l_device",
         "live_agent_m4l_cleanup",
@@ -542,6 +543,39 @@ def test_agent_audio_tap_setup_and_transport_tools_forward_to_bridge():
     assert response["result"]["structuredContent"]["method"] == "transport"
 
 
+def test_transport_tool_forwards_play_from_and_play_loop():
+    bridge = FakeBridge()
+    server = make_server(bridge)
+    play_from_args = {"action": "play_from", "time": 300.0}
+    response = server.handle({
+        "jsonrpc": "2.0",
+        "id": 340,
+        "method": "tools/call",
+        "params": {"name": "live_transport", "arguments": play_from_args},
+    })
+    assert response["result"]["structuredContent"]["method"] == "transport"
+
+    play_loop_args = {"action": "play_loop", "loop_start": 240.0, "loop_length": 8.0, "offset": 2.0}
+    response = server.handle({
+        "jsonrpc": "2.0",
+        "id": 341,
+        "method": "tools/call",
+        "params": {"name": "live_transport", "arguments": play_loop_args},
+    })
+    assert bridge.calls == [("transport", play_from_args), ("transport", play_loop_args)]
+    assert response["result"]["structuredContent"]["method"] == "transport"
+
+
+def test_transport_tool_schema_advertises_play_from_and_loop_props():
+    server = make_server(FakeBridge())
+    schema = server.tools["live_transport"].as_mcp()["inputSchema"]
+    assert schema["properties"]["action"]["enum"] == [
+        "play", "continue", "stop", "status", "play_from", "play_loop",
+    ]
+    for prop in ("loop_start", "loop_length", "offset", "jump_attempts"):
+        assert prop in schema["properties"]
+
+
 def test_transport_tool_rejects_unknown_action_before_bridge():
     bridge = FakeBridge()
     server = make_server(bridge)
@@ -552,7 +586,42 @@ def test_transport_tool_rejects_unknown_action_before_bridge():
         "params": {"name": "live_transport", "arguments": {"action": "restart"}},
     })
 
-    assert response["error"]["message"] == "arguments.action must be one of: play, continue, stop, status"
+    assert response["error"]["message"] == (
+        "arguments.action must be one of: play, continue, stop, status, play_from, play_loop"
+    )
+    assert bridge.calls == []
+
+
+def test_record_track_to_wav_tool_forwards_to_bridge():
+    bridge = FakeBridge()
+    server = make_server(bridge)
+    args = {
+        "path": "/tmp/take.wav",
+        "target_track": {"path": "live_set tracks 0"},
+        "region_start": 16.0,
+        "region_length": 8.0,
+        "repeats": 2,
+    }
+    response = server.handle({
+        "jsonrpc": "2.0",
+        "id": 350,
+        "method": "tools/call",
+        "params": {"name": "live_record_track_to_wav", "arguments": args},
+    })
+    assert bridge.calls == [("record_track_to_wav", args)]
+    assert response["result"]["structuredContent"]["method"] == "record_track_to_wav"
+
+
+def test_record_track_to_wav_tool_requires_path_before_bridge():
+    bridge = FakeBridge()
+    server = make_server(bridge)
+    response = server.handle({
+        "jsonrpc": "2.0",
+        "id": 351,
+        "method": "tools/call",
+        "params": {"name": "live_record_track_to_wav", "arguments": {"region_length": 8.0}},
+    })
+    assert "path" in response["error"]["message"]
     assert bridge.calls == []
 
 
@@ -2484,10 +2553,11 @@ def test_tool_list_stays_compact():
     server = make_server(FakeBridge())
     response = server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
     payload = json.dumps(response, separators=(",", ":"))
-    # Re-baselined when the tap gained duration_ms/bars (deterministic stop) and
-    # the short OCR notes landed on the capture-tool descriptions; keep new tools
-    # terse so this stays meaningful.
-    assert len(payload) < 18450
+    # Re-baselined when the tap gained duration_ms/bars (deterministic stop), the
+    # short OCR notes landed on the capture-tool descriptions, and play_from/
+    # play_loop (extra transport schema) + live_record_track_to_wav (a full-schema
+    # turnkey tool) landed; keep new tools terse so this stays meaningful.
+    assert len(payload) < 21000
     live_eval = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_eval")
     assert "live_exec" in live_eval["description"]
     assert "duplicate session clips" not in live_eval["description"].lower()
@@ -2509,7 +2579,9 @@ def test_tool_list_stays_compact():
     transport = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_transport")
     assert "continue" in transport["description"]
     assert {"action", "time", "timeout", "strict_timeout"} <= set(transport["inputSchema"]["properties"])
-    assert transport["inputSchema"]["properties"]["action"]["enum"] == ["play", "continue", "stop", "status"]
+    assert transport["inputSchema"]["properties"]["action"]["enum"] == [
+        "play", "continue", "stop", "status", "play_from", "play_loop",
+    ]
     tap = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_agent_audio_tap")
     assert {"command", "path", "id", "udp", "duration_ms", "bars"} <= set(tap["inputSchema"]["properties"])
     assert tap["inputSchema"]["required"] == ["command"]
@@ -3110,7 +3182,7 @@ def test_remote_script_status_detects_stale_install(tmp_path):
     assert current["current"] is True
     assert len(current["source_bridge_sha256"]) == 64
     assert current["target_bridge_sha256"] == current["source_bridge_sha256"]
-    assert current["source_runtime_version"] == "transport-stop-settle-1"
+    assert current["source_runtime_version"] == "transport-play-from-1"
     assert current["target_runtime_version"] == current["source_runtime_version"]
     assert len(current["source_runtime_code_sha256"]) == 64
     assert current["target_runtime_code_sha256"] == current["source_runtime_code_sha256"]

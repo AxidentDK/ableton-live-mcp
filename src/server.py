@@ -280,6 +280,22 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
     }, ["ref", "device_name"]), forward("track_insert_device")))
     server.add_tool(Tool("live_agent_audio_tap", AGENT_AUDIO_TAP_DESCRIPTION, AGENT_AUDIO_TAP_SCHEMA, forward("agent_audio_tap")))
     server.add_tool(Tool("live_agent_audio_tap_setup", AGENT_AUDIO_TAP_SETUP_DESCRIPTION, loose_schema(), forward("agent_audio_tap_setup")))
+    server.add_tool(Tool("live_record_track_to_wav", "Turnkey: solo a track, load the master AgentAudioTap, position arrangement playback over a region, start a self-terminating capture that finalizes the WAV. Composes agent_audio_tap_setup + play_from + the tap's duration_ms/bars cap. DEFERRED: returns deferred_record:true immediately; the tap auto-stops after the duration cap. Build AgentAudioTap first.", schema({
+        "path": {"type": "string", "description": "Output .wav path."},
+        "target_track": ref,
+        "solo_track": ref,
+        "placement": {"type": "string", "enum": ["master"]},
+        "exclusive_solo": {"type": "boolean", "description": "Solo only the target (default true)."},
+        "remove_existing": {"type": "boolean"},
+        "region_start": {"type": "number", "description": "Region start beats (default: playhead)."},
+        "region_length": {"type": "number", "minimum": 0, "description": "Region beats; loops + derives duration."},
+        "loop": {"type": "boolean", "description": "Loop region (default true with region_length)."},
+        "repeats": {"type": "number", "minimum": 0, "description": "Laps to capture (default 1)."},
+        "duration_ms": {"type": "number", "minimum": 0, "description": "Explicit record ms; wins."},
+        "record_bars": {"type": "number", "minimum": 0, "description": "Record duration in bars."},
+        "udp": {"type": "boolean"},
+        "timeout": response_controls["timeout"],
+    }, ["path"]), forward("record_track_to_wav")))
     server.add_tool(Tool("live_visual_capture", VISUAL_CAPTURE_DESCRIPTION, loose_schema(), lambda args: capture_ableton_window(
         output_path=args.get("output_path"),
         title_contains=args.get("title_contains"),
@@ -428,9 +444,13 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
 
     server.add_tool(Tool("live_agent_m4l_device", AGENT_M4L_TOOL_DESCRIPTION, loose_schema(), agent_m4l_device))
     server.add_tool(Tool("live_agent_m4l_cleanup", AGENT_M4L_CLEANUP_DESCRIPTION, loose_schema(), forward("agent_m4l_cleanup")))
-    server.add_tool(Tool("live_transport", "Transport status/play/continue/stop; seek.", schema({
-        "action": {"type": "string", "enum": ["play", "continue", "stop", "status"]},
-        "time": {"type": "number"},
+    server.add_tool(Tool("live_transport", "Arrangement transport: status/play/continue/stop; seek (time); play_from=play then jump to time (reliable 'play from beat X'); play_loop=set loop brace (loop_start/loop_length), enable loop, jump in. play_from/play_loop return deferred_jump:true immediately; re-read status to confirm the landed position.", schema({
+        "action": {"type": "string", "enum": ["play", "continue", "stop", "status", "play_from", "play_loop"]},
+        "time": {"type": "number", "description": "Target beats for seek/play_from."},
+        "loop_start": {"type": "number", "description": "play_loop: loop brace start (beats)."},
+        "loop_length": {"type": "number", "minimum": 0, "description": "play_loop: loop brace length (beats)."},
+        "offset": {"type": "number", "description": "play_loop: beats past loop_start to land in."},
+        "jump_attempts": {"type": "integer", "minimum": 1, "description": "Max deferred ticks to retry the jump (default 4)."},
         "timeout": response_controls["timeout"],
         **strict_timeout_control,
     }), forward("transport")))
