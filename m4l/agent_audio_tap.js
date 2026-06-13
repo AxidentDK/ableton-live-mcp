@@ -4,6 +4,7 @@ outlets = 3;
 
 var isRecording = false;
 var lastPath = "";
+var lastDurationMs = 0;
 var commandFile = jsarguments.length > 1 ? String(jsarguments[1]) : "agent_audio_tap_command.json";
 var lastCommandId = "";
 var pollTask = null;
@@ -46,7 +47,7 @@ function pollCommandFile() {
         return;
     }
     lastCommandId = id;
-    handleCommand([command.command, command.path]);
+    handleCommand([command.command, command.path, command.duration_ms]);
 }
 
 function anything() {
@@ -81,12 +82,15 @@ function handle(raw) {
         return;
     }
 
-    handleCommand([command.command, command.path]);
+    handleCommand([command.command, command.path, command.duration_ms]);
 }
 
 function handleCommand(parts) {
     var command = parts[0];
     var path = parts[1];
+    // Optional capture duration in milliseconds. When present and positive, the
+    // recording self-terminates after that many ms (see startRecording).
+    var durationMs = normalizeDuration(parts[2]);
 
     if (!command) {
         outlet(2, "error", "missing_command");
@@ -98,10 +102,10 @@ function handleCommand(parts) {
     } else if (command === "start") {
         if (path) {
             openPath(path);
-            scheduleStartRecording();
+            scheduleStartRecording(durationMs);
             return;
         }
-        startRecording();
+        startRecording(durationMs);
     } else if (command === "stop") {
         stopRecording();
     } else if (command === "status") {
@@ -111,11 +115,31 @@ function handleCommand(parts) {
     }
 }
 
-function scheduleStartRecording() {
-    if (!startTask) {
-        startTask = new Task(startRecording, this);
+function normalizeDuration(value) {
+    if (value === undefined || value === null || value === "") {
+        return 0;
     }
+    var ms = parseFloat(value);
+    if (!isFinite(ms) || ms <= 0) {
+        return 0;
+    }
+    return ms;
+}
+
+function scheduleStartRecording(durationMs) {
+    if (!startTask) {
+        startTask = new Task(deferredStart, this);
+    }
+    // sfrecord~ finalizes/closes the file when a "record <ms>" auto-stop fires,
+    // and a fresh "open" is required before the next capture. openPath already
+    // re-opened above, so carry the duration through to the deferred start.
+    startTask.arguments = [durationMs];
     startTask.schedule(500);
+}
+
+function deferredStart() {
+    // Task callbacks receive the Task's `arguments` as call arguments.
+    startRecording(arguments.length ? arguments[0] : 0);
 }
 
 function openPath(path) {
@@ -128,18 +152,31 @@ function openPath(path) {
     report("open");
 }
 
-function startRecording() {
+function startRecording(durationMs) {
     if (!lastPath) {
         outlet(2, "error", "no_output_path");
         return;
     }
+    lastDurationMs = normalizeDuration(durationMs);
     isRecording = true;
-    outlet(0, 1);
+    if (lastDurationMs > 0) {
+        // "record <ms>": sfrecord~ records for exactly lastDurationMs then
+        // auto-stops AND finalizes/closes the file — a deterministic, self-
+        // terminating capture (no unreliable stop, no ballooning WAV). Do NOT
+        // also send a trailing 0; that would double-finalize. The next capture
+        // re-opens via the start command's path (openPath -> scheduleStart).
+        outlet(0, "record", lastDurationMs);
+    } else {
+        // Fallback: continuous recording until an explicit stop (the legacy
+        // behavior, kept for callers that don't supply a duration).
+        outlet(0, 1);
+    }
     report("start");
 }
 
 function stopRecording() {
     isRecording = false;
+    lastDurationMs = 0;
     outlet(0, 0);
     report("stop");
 }
@@ -148,6 +185,14 @@ function report(eventName) {
     outlet(1, JSON.stringify({
         event: eventName,
         recording: isRecording,
-        path: lastPath
+        path: lastPath,
+        // duration_ms is the requested cap for a self-terminating "record <ms>"
+        // capture, or 0 for a continuous (stop-terminated) one. NOTE: this is the
+        // REQUESTED duration, not a measured byte/length count read back from
+        // sfrecord~ — the current patch leaves sfrecord~'s status outlet
+        // unwired (numoutlets 0), so the JS cannot observe the finalized file.
+        // Wiring sfrecord~'s sync outlet back into this [js] is a follow-up if a
+        // measured completion signal is needed.
+        duration_ms: lastDurationMs
     }));
 }

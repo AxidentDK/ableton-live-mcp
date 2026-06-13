@@ -546,3 +546,161 @@ def test_visual_capture_cli_returns_json_error(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert '"ok": false' in output
     assert '"blocked"' in output
+
+
+# --- OCR-on-capture (opt-in ocr=true) ------------------------------------------------
+
+
+def _draw_ocr_fixture(path):
+    # A few words + a number, drawn with a real TrueType font so the glyphs are
+    # legible to Vision. The exact font is not load-bearing; we just need crisp text.
+    Image = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+
+    font = None
+    for candidate in (
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Arial.ttf",
+    ):
+        if Path(candidate).exists():
+            try:
+                font = ImageFont.truetype(candidate, 40)
+                break
+            except Exception:
+                pass
+    image = Image.new("RGB", (480, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((20, 20), "ERROR jsobject", fill="black", font=font)
+    draw.text((20, 90), "value 128", fill="black", font=font)
+    image.save(path)
+
+
+def test_run_ocr_reads_known_text_and_boxes(tmp_path):
+    # Gate on Apple Vision being importable so the suite stays green off-macOS
+    # (mirrors the importorskip precedent used for the Pillow/windows paths).
+    pytest.importorskip("Vision")
+    import ocr
+
+    fixture = tmp_path / "fixture.png"
+    _draw_ocr_fixture(fixture)
+
+    result = ocr.run_ocr(str(fixture))
+
+    assert result["engine"] == "apple-vision"
+    blob = result["text"].lower()
+    assert "error" in blob
+    assert "jsobject" in blob or "js" in blob
+    assert "128" in blob
+    # Every recognized line carries a confidence and a 4-tuple pixel box that
+    # lands inside the source image (480x160), origin top-left.
+    assert result["lines"], "expected at least one recognized line"
+    for line in result["lines"]:
+        assert 0.0 <= line["confidence"] <= 1.0
+        x, y, w, h = line["bbox"]
+        assert w > 0 and h > 0
+        assert 0 <= x <= 480 and 0 <= y <= 160
+        assert x + w <= 480 + 2 and y + h <= 160 + 2  # allow rounding slop
+    # The "value 128" line is drawn below "ERROR jsobject"; boxes preserve that
+    # ordering (top-left origin), confirming the y-flip is correct.
+    tops = [line["bbox"][1] for line in result["lines"]]
+    assert tops == sorted(tops) or len(result["lines"]) == 1
+
+
+def test_run_ocr_drops_lines_below_min_confidence(tmp_path):
+    pytest.importorskip("Vision")
+    import ocr
+
+    fixture = tmp_path / "fixture.png"
+    _draw_ocr_fixture(fixture)
+
+    # An impossible confidence floor drops everything but still returns the stub
+    # shape (engine present, empty lines/text) rather than raising.
+    result = ocr.run_ocr(str(fixture), min_confidence=1.1)
+    assert result["engine"] == "apple-vision"
+    assert result["lines"] == []
+    assert result["text"] == ""
+
+
+def test_run_ocr_runs_on_full_res_before_downscale(tmp_path, monkeypatch):
+    # capture_ableton_window must OCR the native-resolution file BEFORE
+    # postprocess downscales it in place. We assert run_capture_ocr sees the
+    # full-size image even when max_width forces a thumbnail.
+    Image = pytest.importorskip("PIL.Image")
+    seen_sizes = {}
+
+    def fake_run_ocr(path, **_kwargs):
+        with Image.open(path) as image:
+            seen_sizes["ocr"] = image.size
+        return {"engine": "fake", "lines": [], "text": ""}
+
+    import ocr as ocr_module
+
+    monkeypatch.setattr(ocr_module, "run_ocr", fake_run_ocr)
+    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [_macos_ableton_window()])
+    monkeypatch.setattr(
+        visual_capture,
+        "capture_window",
+        lambda _w, output, _b: Image.new("RGB", (400, 300), "white").save(output) or "fake",
+    )
+
+    result = visual_capture.capture_ableton_window(output_path=tmp_path / "live.png", max_width=100, ocr=True)
+
+    # OCR saw the full 400x300 capture; the saved PNG was downscaled afterward.
+    assert seen_sizes["ocr"] == (400, 300)
+    assert result["ocr"]["engine"] == "fake"
+    assert result["postprocess"]["size"][0] <= 100
+
+
+def test_capture_ocr_disabled_by_default(monkeypatch, tmp_path):
+    Image = pytest.importorskip("PIL.Image")
+    called = {"n": 0}
+
+    import ocr as ocr_module
+
+    def fake_run_ocr(*_a, **_k):
+        called["n"] += 1
+        return {"engine": "fake", "lines": [], "text": ""}
+
+    monkeypatch.setattr(ocr_module, "run_ocr", fake_run_ocr)
+    monkeypatch.setattr(visual_capture, "list_platform_windows", lambda: [_macos_ableton_window()])
+    monkeypatch.setattr(
+        visual_capture,
+        "capture_window",
+        lambda _w, output, _b: Image.new("RGB", (400, 300), "white").save(output) or "fake",
+    )
+
+    result = visual_capture.capture_ableton_window(output_path=tmp_path / "live.png")
+
+    assert "ocr" not in result
+    assert called["n"] == 0
+
+
+def test_run_capture_ocr_degrades_on_failure(tmp_path, monkeypatch):
+    # An OCR failure must never sink the capture: run_capture_ocr returns an
+    # error stub instead of propagating.
+    import ocr as ocr_module
+
+    monkeypatch.setattr(ocr_module, "run_ocr", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("vision boom")))
+    out = tmp_path / "x.png"
+    out.write_bytes(b"not-an-image")
+
+    stub = visual_capture.run_capture_ocr(out, True, None)
+    assert stub["engine"] == "error"
+    assert "vision boom" in stub["error"]
+    assert stub["lines"] == [] and stub["text"] == ""
+
+
+def test_run_ocr_non_macos_returns_unavailable_stub(monkeypatch, tmp_path):
+    # On a non-Darwin platform run_ocr returns a clear stub rather than raising.
+    import ocr
+
+    monkeypatch.setattr(ocr.platform, "system", lambda: "Linux")
+    result = ocr.run_ocr(str(tmp_path / "whatever.png"))
+    assert result == {
+        "engine": "none",
+        "lines": [],
+        "text": "",
+        "error": "ocr_unavailable",
+        "detail": "OCR is currently implemented for macOS (Apple Vision) only; platform=Linux",
+    }

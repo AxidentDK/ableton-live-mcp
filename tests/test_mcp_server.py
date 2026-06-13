@@ -2484,7 +2484,10 @@ def test_tool_list_stays_compact():
     server = make_server(FakeBridge())
     response = server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
     payload = json.dumps(response, separators=(",", ":"))
-    assert len(payload) < 18000
+    # Re-baselined when the tap gained duration_ms/bars (deterministic stop) and
+    # the short OCR notes landed on the capture-tool descriptions; keep new tools
+    # terse so this stays meaningful.
+    assert len(payload) < 18450
     live_eval = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_eval")
     assert "live_exec" in live_eval["description"]
     assert "duplicate session clips" not in live_eval["description"].lower()
@@ -2508,7 +2511,7 @@ def test_tool_list_stays_compact():
     assert {"action", "time", "timeout", "strict_timeout"} <= set(transport["inputSchema"]["properties"])
     assert transport["inputSchema"]["properties"]["action"]["enum"] == ["play", "continue", "stop", "status"]
     tap = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_agent_audio_tap")
-    assert {"command", "path", "id", "udp"} <= set(tap["inputSchema"]["properties"])
+    assert {"command", "path", "id", "udp", "duration_ms", "bars"} <= set(tap["inputSchema"]["properties"])
     assert tap["inputSchema"]["required"] == ["command"]
     assert "stop" in tap["inputSchema"]["properties"]["command"]["enum"]
     assert "start with path" in tap["description"]
@@ -2559,6 +2562,8 @@ def test_live_visual_capture_forwards_region_crop_and_size_args(monkeypatch):
         "bottom_fraction": 0.3,
         "max_width": 900,
         "max_height": 260,
+        "ocr": False,
+        "ocr_lang": None,
     }
 
 

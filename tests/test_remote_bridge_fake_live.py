@@ -603,6 +603,134 @@ def test_agent_audio_tap_start_can_use_preopened_path(monkeypatch):
     assert sent == [(b"/agent_audio_tap\x00\x00\x00\x00,s\x00\x00start\x00\x00\x00", ("127.0.0.1", 17654))]
 
 
+def _capture_tap_payload(bridge, monkeypatch, params):
+    written = []
+
+    class FakeFile:
+        def __init__(self, path, mode):
+            self.value = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            written.append(json.loads(self.value))
+            return False
+
+        def write(self, value):
+            self.value += value
+            return len(value)
+
+    module = load_bridge_module(monkeypatch)[0]
+    monkeypatch.setattr(module, "open", lambda path, mode: FakeFile(path, mode), raising=False)
+    bridge.__class__ = module.AbletonLiveMCP
+    result = bridge._rpc_agent_audio_tap(params)
+    return result, written[-1]
+
+
+def test_agent_audio_tap_start_with_duration_ms_writes_record_duration(monkeypatch):
+    bridge, _song, _app = make_bridge(monkeypatch)
+    result, payload = _capture_tap_payload(
+        bridge, monkeypatch, {"command": "start", "path": "tap.wav", "duration_ms": 2500}
+    )
+    assert payload["duration_ms"] == 2500
+    assert payload["command"] == "start"
+    assert result["duration_ms"] == 2500
+
+
+def test_agent_audio_tap_start_with_bars_converts_via_tempo_and_meter(monkeypatch):
+    bridge, song, _app = make_bridge(monkeypatch)
+    # 120 BPM, 4/4: one bar = 4 quarter notes = 2000 ms; 2 bars = 4000 ms.
+    song.tempo = 120.0
+    song.signature_numerator = 4
+    song.signature_denominator = 4
+    _result, payload = _capture_tap_payload(
+        bridge, monkeypatch, {"command": "start", "path": "tap.wav", "bars": 2}
+    )
+    assert payload["duration_ms"] == 4000.0
+
+
+def test_agent_audio_tap_bars_to_ms_respects_tempo_and_signature(monkeypatch):
+    module = load_bridge_module(monkeypatch)[0]
+    # 90 BPM, 3/4: one bar = 3 quarter notes; quarter = 60000/90 ms ≈ 666.67 ms;
+    # bar ≈ 2000 ms.
+    assert module._bars_to_ms(1, 90.0, 3, 4) == 3 * (60000.0 / 90.0)
+    # 6/8 at 120 BPM: bar = 6 eighth notes = 3 quarter notes = 1500 ms.
+    assert module._bars_to_ms(1, 120.0, 6, 8) == 1500.0
+    # 4/4 at 120 BPM: bar = 2000 ms.
+    assert module._bars_to_ms(1, 120.0, 4, 4) == 2000.0
+
+
+def test_agent_audio_tap_duration_ms_takes_precedence_over_bars(monkeypatch):
+    bridge, _song, _app = make_bridge(monkeypatch)
+    _result, payload = _capture_tap_payload(
+        bridge, monkeypatch, {"command": "start", "path": "tap.wav", "duration_ms": 1000, "bars": 8}
+    )
+    assert payload["duration_ms"] == 1000
+
+
+def test_agent_audio_tap_rejects_nonpositive_duration(monkeypatch):
+    bridge, _song, _app = make_bridge(monkeypatch)
+    module = load_bridge_module(monkeypatch)[0]
+    bridge.__class__ = module.AbletonLiveMCP
+    import pytest
+
+    with pytest.raises(ValueError, match="duration_ms must be positive"):
+        bridge._rpc_agent_audio_tap({"command": "start", "path": "tap.wav", "duration_ms": 0})
+    with pytest.raises(ValueError, match="bars must be positive"):
+        bridge._rpc_agent_audio_tap({"command": "start", "path": "tap.wav", "bars": -1})
+
+
+def test_agent_audio_tap_no_duration_omits_field(monkeypatch):
+    # Continuous (legacy) capture: no duration_ms in the payload or result.
+    bridge, _song, _app = make_bridge(monkeypatch)
+    result, payload = _capture_tap_payload(
+        bridge, monkeypatch, {"command": "start", "path": "tap.wav"}
+    )
+    assert "duration_ms" not in payload
+    assert "duration_ms" not in result
+
+
+def test_agent_audio_tap_duration_ignored_for_non_start_commands(monkeypatch):
+    # duration_ms only applies to start; a stray duration on stop is dropped.
+    bridge, _song, _app = make_bridge(monkeypatch)
+    _result, payload = _capture_tap_payload(
+        bridge, monkeypatch, {"command": "stop", "duration_ms": 2500}
+    )
+    assert "duration_ms" not in payload
+    assert payload["command"] == "stop"
+
+
+def test_agent_audio_tap_generated_ids_are_unique_even_at_same_time(monkeypatch):
+    # The monotonic seq makes ids differ even when time.time() repeats within a tick.
+    bridge, _song, _app = make_bridge(monkeypatch)
+    module = load_bridge_module(monkeypatch)[0]
+    monkeypatch.setattr(module.time, "time", lambda: 1.0)  # frozen clock
+    bridge.__class__ = module.AbletonLiveMCP
+
+    written = []
+
+    class FakeFile:
+        def __init__(self, path, mode):
+            self.value = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            written.append(json.loads(self.value))
+            return False
+
+        def write(self, value):
+            self.value += value
+            return len(value)
+
+    monkeypatch.setattr(module, "open", lambda path, mode: FakeFile(path, mode), raising=False)
+    bridge._rpc_agent_audio_tap({"command": "start", "path": "tap.wav", "id": "take-1"})
+    bridge._rpc_agent_audio_tap({"command": "stop", "id": "take-1"})
+    assert written[0]["id"] != written[1]["id"]
+
+
 def test_agent_audio_tap_setup_loads_on_master_and_solos_target(monkeypatch):
     bridge, song, app = make_bridge(monkeypatch)
     song.tracks[1].devices.append(FakeDevice())

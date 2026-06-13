@@ -51,8 +51,8 @@ AGENT_M4L_TOOL_DESCRIPTION = (
 AGENT_M4L_CLEANUP_DESCRIPTION = "Dry-run/delete AgentM4L; ask before delete."
 AGENT_AUDIO_TAP_DESCRIPTION = "AgentAudioTap: command open/start/stop/status; start with path; UDP optional."
 AGENT_AUDIO_TAP_SETUP_DESCRIPTION = "Load AgentAudioTap; solo target track; verify."
-VISUAL_CAPTURE_DESCRIPTION = "Ableton Live window-only; device-detail crop/downscale; region-rel; no arbitrary apps/windows."
-MAX_CONSOLE_CAPTURE_DESCRIPTION = "Max Console ('Max for Live' window) as an image: Max errors/post() the LOM hides. Opts: display=<n>/backend/list_only, crop/downscale."
+VISUAL_CAPTURE_DESCRIPTION = "Ableton Live window-only; device-detail crop/downscale; region-rel; no arbitrary apps/windows. ocr=true attaches recognized text+boxes (macOS Apple Vision; stub elsewhere)."
+MAX_CONSOLE_CAPTURE_DESCRIPTION = "Max Console ('Max for Live' window) as an image: Max errors/post() the LOM hides. Opts: display=<n>/backend/list_only, crop/downscale, ocr=true (macOS)."
 AGENT_AUDIO_TAP_SCHEMA = {
     "type": "object",
     "properties": {
@@ -60,6 +60,11 @@ AGENT_AUDIO_TAP_SCHEMA = {
         "path": {"type": "string"},
         "id": {"type": "string"},
         "udp": {"type": "boolean"},
+        # Self-terminating capture (start only): duration_ms records for that many
+        # ms then auto-stops + finalizes the WAV; bars converts to ms from the
+        # project tempo + time signature. duration_ms wins if both are given.
+        "duration_ms": {"type": "number", "minimum": 0},
+        "bars": {"type": "number", "minimum": 0},
     },
     "required": ["command"],
 }
@@ -286,6 +291,8 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         bottom_fraction=args.get("bottom_fraction"),
         max_width=args.get("max_width"),
         max_height=args.get("max_height"),
+        ocr=bool(args.get("ocr", False)),
+        ocr_lang=args.get("ocr_lang"),
     )))
     server.add_tool(Tool("live_max_console_capture", MAX_CONSOLE_CAPTURE_DESCRIPTION, loose_schema(), lambda args: capture_max_console_window(
         output_path=args.get("output_path"),
@@ -299,6 +306,8 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         max_width=args.get("max_width"),
         max_height=args.get("max_height"),
         display=args.get("display"),
+        ocr=bool(args.get("ocr", False)),
+        ocr_lang=args.get("ocr_lang"),
     )))
     def agent_m4l_device(args):
         built = None
