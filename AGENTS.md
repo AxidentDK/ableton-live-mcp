@@ -81,7 +81,9 @@ This repo includes `m4l/AgentAudioTap.amxd`, a Max for Live audio effect that le
 .venv/bin/python scripts/build_agent_audio_tap.py --install
 ```
 
-Each `AgentAudioTap` command must have a unique command id. Let the MCP generate it when possible, or use distinct ids for `start` and `stop`; reusing the same id can cause the Max device to ignore the stop command and leave an unfinalized WAV.
+Each `AgentAudioTap` command must have a unique command id. Let the MCP generate it when possible, or use distinct ids for `start` and `stop`; reusing the same id can cause the Max device to ignore the stop command and leave an unfinalized WAV. (Generated ids now fold in a monotonic counter as well as `time.time()`, so a start/stop pair sharing a `request_id` cannot collide within one clock tick.)
+
+Prefer a self-terminating capture: pass `duration_ms` (or `bars`, converted from the project tempo + time signature) on a `start` command. The device then sends `sfrecord~` a `record <ms>` message, which records for exactly that long, then auto-stops AND finalizes the WAV — no separate `stop`, no unreliable stop, no ballooning file. Without a duration the recording is continuous and must be ended with an explicit `stop`.
 
 For validation captures, call `live_agent_audio_tap` with a `command` field. Prefer one atomic `{"command": "start", "path": "..."}` command, then a later `{"command": "stop"}`. Avoid separate `open` then `start` command-file writes unless you also add an acknowledgement wait; otherwise the tap can poll only the later `start` and Max may log `sfrecord~: start requested without preceding open`.
 

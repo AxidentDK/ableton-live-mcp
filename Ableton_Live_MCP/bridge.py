@@ -45,6 +45,32 @@ LEGACY_NOTE_API_NAMES = (
     "deselect_all_notes",
 )
 
+# Monotonic component for AgentAudioTap command ids. Reusing a command id makes
+# the [js] poller treat a follow-up command (e.g. a stop) as a duplicate of the
+# last one and silently ignore it, leaving an unfinalized WAV (see AGENTS.md).
+# time.time() alone can repeat within a coarse clock tick, so every generated id
+# also folds in this strictly-increasing counter.
+_AGENT_AUDIO_TAP_SEQ_LOCK = threading.Lock()
+_agent_audio_tap_seq = 0
+
+
+def _next_agent_audio_tap_seq():
+    global _agent_audio_tap_seq
+    with _AGENT_AUDIO_TAP_SEQ_LOCK:
+        _agent_audio_tap_seq += 1
+        return _agent_audio_tap_seq
+
+
+def _bars_to_ms(bars, tempo_bpm, numerator, denominator):
+    # Live's tempo is BPM measured in quarter notes. A bar holds `numerator`
+    # notes each worth 1/`denominator` of a whole note, i.e. numerator*(4/denom)
+    # quarter notes; at `tempo_bpm` quarter notes per minute that is
+    #   bars * numerator * (4/denom) * (60000 / tempo) milliseconds.
+    if tempo_bpm <= 0 or numerator <= 0 or denominator <= 0:
+        raise ValueError("tempo, signature numerator, and denominator must be positive")
+    quarter_notes = float(bars) * float(numerator) * (4.0 / float(denominator))
+    return quarter_notes * (60000.0 / float(tempo_bpm))
+
 
 def _runtime_code_fingerprint():
     payload = {
@@ -412,21 +438,35 @@ class AbletonLiveMCP(ControlSurface):
         path = params.get("path")
         if command == "open" and not path:
             raise ValueError("path is required for open")
+        # Optional self-terminating capture duration (start only). A direct
+        # duration_ms wins; otherwise bars are converted to ms from the project
+        # tempo + time signature. When set, the [js] sends sfrecord~ "record <ms>"
+        # so the recording auto-stops AND finalizes the WAV — no unreliable stop.
+        duration_ms = None
+        if command == "start":
+            duration_ms = self._agent_audio_tap_duration_ms(params)
         args = [command]
         if path:
             args.append(path)
         request_id = params.get("id")
+        # Fold a strictly-increasing sequence number into the generated id so two
+        # commands sharing a request_id (a classic start/stop pair) never collide
+        # within a coarse time.time() tick — a collision makes the [js] ignore the
+        # second command and leave an unfinalized WAV.
         command_id = params.get("command_id") or hashlib.sha1(json.dumps({
             "request_id": request_id,
             "command": command,
             "path": path,
             "time": time.time(),
+            "seq": _next_agent_audio_tap_seq(),
         }, sort_keys=True).encode("utf-8")).hexdigest()
         command_file = params.get("command_file") or _temp_file("agent_audio_tap_command.json")
         with open(command_file, "w") as handle:
             payload = {"id": command_id, "command": command, "path": path}
             if request_id is not None:
                 payload["request_id"] = request_id
+            if duration_ms is not None:
+                payload["duration_ms"] = duration_ms
             json.dump(payload, handle, separators=(",", ":"))
         sent = False
         payload_size = 0
@@ -439,7 +479,36 @@ class AbletonLiveMCP(ControlSurface):
                 sent = True
             finally:
                 sock.close()
-        return {"sent": sent, "command": command, "path": path, "bytes": payload_size, "command_file": command_file, "command_id": command_id}
+        result = {"sent": sent, "command": command, "path": path, "bytes": payload_size, "command_file": command_file, "command_id": command_id}
+        if duration_ms is not None:
+            result["duration_ms"] = duration_ms
+        return result
+
+    def _agent_audio_tap_duration_ms(self, params):
+        # Returns a positive float of milliseconds, or None for an uncapped
+        # (continuous) recording. duration_ms takes precedence over bars.
+        raw_ms = params.get("duration_ms")
+        if raw_ms is not None:
+            ms = float(raw_ms)
+            if ms <= 0:
+                raise ValueError("duration_ms must be positive")
+            return ms
+        bars = params.get("bars")
+        if bars is None:
+            return None
+        bars = float(bars)
+        if bars <= 0:
+            raise ValueError("bars must be positive")
+        return _bars_to_ms(bars, *self._agent_audio_tap_tempo_meter())
+
+    def _agent_audio_tap_tempo_meter(self):
+        # (tempo_bpm, signature_numerator, signature_denominator) from the Live
+        # set, with sane fallbacks so bars->ms never divides by zero.
+        song = self.song()
+        tempo = float(getattr(song, "tempo", 120.0) or 120.0)
+        numerator = int(getattr(song, "signature_numerator", 4) or 4)
+        denominator = int(getattr(song, "signature_denominator", 4) or 4)
+        return tempo, numerator, denominator
 
     def _rpc_agent_audio_tap_setup(self, params):
         song = self.song()

@@ -50,8 +50,8 @@ AGENT_M4L_TOOL_DESCRIPTION = (
 AGENT_M4L_CLEANUP_DESCRIPTION = "Dry-run/delete AgentM4L; ask before delete."
 AGENT_AUDIO_TAP_DESCRIPTION = "AgentAudioTap: command open/start/stop/status; start with path; UDP optional."
 AGENT_AUDIO_TAP_SETUP_DESCRIPTION = "Load AgentAudioTap; solo target track; verify."
-VISUAL_CAPTURE_DESCRIPTION = "Ableton Live window-only; device-detail crop/downscale; region-rel; no arbitrary apps/windows. macOS: embedded M4L jweb/jbrowser (WebView/CEF) device UIs capture via the default backend; if a capture reads back blank it auto-retries SCK then a window-cropped whole-display grab (the 'backend' field reports what was used; recovered_from_blank flags it). Force with backend='sck'."
-MAX_CONSOLE_CAPTURE_DESCRIPTION = "Read the Max Console (Max for Live runtime log) as an image to see Max-level errors/post() output that never reach a plugin's own logfile. Defaults to a window-isolated ScreenCaptureKit grab (macOS 14+) that reads the console's GPU-backed surface regardless of z-order — no setup needed. Alternatives: display=<n> (whole-display fallback; list_only=true enumerates displays), backend='quartz'/'screencapture' (legacy, returns black for the console). crop/downscale supported. Note: the live console window is owned by Live and titled 'Max for Live'."
+VISUAL_CAPTURE_DESCRIPTION = "Ableton Live window-only; device-detail crop/downscale; region-rel; no arbitrary apps/windows. macOS: embedded M4L jweb/jbrowser (WebView/CEF) device UIs capture via the default backend; if a capture reads back blank it auto-retries SCK then a window-cropped whole-display grab (the 'backend' field reports what was used; recovered_from_blank flags it). Force with backend='sck'. ocr=true (macOS Apple Vision) also returns recognized text+boxes from the native-res capture (ocr_lang optional)."
+MAX_CONSOLE_CAPTURE_DESCRIPTION = "Read the Max Console (Max for Live runtime log) as an image to see Max-level errors/post() output that never reach a plugin's own logfile. Defaults to a window-isolated ScreenCaptureKit grab (macOS 14+) that reads the console's GPU-backed surface regardless of z-order — no setup needed. Alternatives: display=<n> (whole-display fallback; list_only=true enumerates displays), backend='quartz'/'screencapture' (legacy, returns black for the console). crop/downscale supported. ocr=true (macOS Apple Vision) reads the error text back as text+boxes (ocr_lang optional). Note: the live console window is owned by Live and titled 'Max for Live'."
 AGENT_AUDIO_TAP_SCHEMA = {
     "type": "object",
     "properties": {
@@ -59,6 +59,11 @@ AGENT_AUDIO_TAP_SCHEMA = {
         "path": {"type": "string"},
         "id": {"type": "string"},
         "udp": {"type": "boolean"},
+        # Self-terminating capture (start only): duration_ms records for that many
+        # ms then auto-stops + finalizes the WAV; bars converts to ms from the
+        # project tempo + time signature. duration_ms wins if both are given.
+        "duration_ms": {"type": "number", "minimum": 0},
+        "bars": {"type": "number", "minimum": 0},
     },
     "required": ["command"],
 }
@@ -285,6 +290,8 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         bottom_fraction=args.get("bottom_fraction"),
         max_width=args.get("max_width"),
         max_height=args.get("max_height"),
+        ocr=bool(args.get("ocr", False)),
+        ocr_lang=args.get("ocr_lang"),
     )))
     server.add_tool(Tool("live_max_console_capture", MAX_CONSOLE_CAPTURE_DESCRIPTION, loose_schema(), lambda args: capture_max_console_window(
         output_path=args.get("output_path"),
@@ -298,6 +305,8 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         max_width=args.get("max_width"),
         max_height=args.get("max_height"),
         display=args.get("display"),
+        ocr=bool(args.get("ocr", False)),
+        ocr_lang=args.get("ocr_lang"),
     )))
     def agent_m4l_device(args):
         built = None

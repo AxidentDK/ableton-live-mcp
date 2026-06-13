@@ -131,6 +131,8 @@ def capture_ableton_window(
     bottom_fraction: float | None = None,
     max_width: int | None = None,
     max_height: int | None = None,
+    ocr: bool = False,
+    ocr_lang: str | None = None,
 ) -> dict[str, Any]:
     windows = list_ableton_windows()
     if list_only:
@@ -139,6 +141,9 @@ def capture_ableton_window(
     output = Path(output_path) if output_path else default_capture_path()
     output.parent.mkdir(parents=True, exist_ok=True)
     backend_used = capture_window(window, output, backend)
+    # Run OCR on the native-resolution capture BEFORE postprocess crops/downscales
+    # the file in place — small console/label fonts must stay legible.
+    ocr_result = run_capture_ocr(output, ocr, ocr_lang)
     postprocess = postprocess_capture(output, region, crop, crop_relative_to_region, bottom_fraction, max_width, max_height)
     result = {
         "ok": True,
@@ -147,6 +152,8 @@ def capture_ableton_window(
         "window": window_result(window),
         "postprocess": postprocess,
     }
+    if ocr_result is not None:
+        result["ocr"] = ocr_result
     # Embedded GPU/IOSurface-backed device UIs — notably Max for Live jweb/jbrowser
     # (WebView/CEF) panels — can read back blank through the legacy per-window
     # snapshot APIs on some macOS versions, while the Max device chrome around them
@@ -173,6 +180,11 @@ def capture_ableton_window(
                 "through the legacy window snapshot on some macOS versions, so this was recaptured "
                 "with the '%s' backend." % backend_used
             )
+            # The first OCR pass ran on the blank original; re-run on the recovered
+            # image so the result reflects what was actually rendered.
+            recovered_ocr = run_capture_ocr(output, ocr, ocr_lang)
+            if recovered_ocr is not None:
+                result["ocr"] = recovered_ocr
     if postprocess.get("content", {}).get("blank"):
         result.update(blank_capture_guidance())
     return result
@@ -190,6 +202,8 @@ def capture_max_console_window(
     max_width: int | None = None,
     max_height: int | None = None,
     display: int | None = None,
+    ocr: bool = False,
+    ocr_lang: str | None = None,
 ) -> dict[str, Any]:
     # The Max Console's content lives on a GPU/IOSurface layer that the legacy
     # per-window APIs (screencapture -l / Quartz CGWindowListCreateImage) can't
@@ -213,6 +227,8 @@ def capture_max_console_window(
 
     if display is not None:
         backend_used = capture_macos_display(int(display), output)
+        # OCR the native-res display grab before postprocess crops/downscales it.
+        ocr_result = run_capture_ocr(output, ocr, ocr_lang)
         postprocess = postprocess_capture(output, region, crop, crop_relative_to_region, bottom_fraction, max_width, max_height)
         result = {
             "ok": True,
@@ -221,6 +237,8 @@ def capture_max_console_window(
             "display": int(display),
             "postprocess": postprocess,
         }
+        if ocr_result is not None:
+            result["ocr"] = ocr_result
         if postprocess.get("content", {}).get("blank"):
             result.update(blank_capture_guidance())
             result["next_action"] = "display_blank_try_another_display_index_see_list_only_displays"
@@ -232,6 +250,9 @@ def capture_max_console_window(
     if backend == "auto" and platform.system() == "Darwin":
         console_backend = "sck"
     backend_used = capture_window(window, output, console_backend)
+    # OCR the native-res console capture before postprocess crops/downscales it —
+    # this is the primary use case (reading Max-level error text as text).
+    ocr_result = run_capture_ocr(output, ocr, ocr_lang)
     postprocess = postprocess_capture(output, region, crop, crop_relative_to_region, bottom_fraction, max_width, max_height)
     result = {
         "ok": True,
@@ -240,6 +261,8 @@ def capture_max_console_window(
         "window": window_result(window),
         "postprocess": postprocess,
     }
+    if ocr_result is not None:
+        result["ocr"] = ocr_result
     if postprocess.get("content", {}).get("blank"):
         result.update(blank_capture_guidance())
         result["warning"] = "blank_capture"
@@ -845,6 +868,24 @@ def normalize_bounds(bounds: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def run_capture_ocr(output: Path, ocr: bool, ocr_lang: str | None) -> dict[str, Any] | None:
+    # Opt-in: only runs when the caller passed ocr=True. Reads the on-disk PNG at
+    # full resolution (callers invoke this BEFORE postprocess downscales the file
+    # in place), so small console/label fonts stay legible. Never let an OCR
+    # failure sink the capture itself — degrade to an error stub instead.
+    if not ocr:
+        return None
+    from ocr import run_ocr
+
+    kwargs: dict[str, Any] = {}
+    if ocr_lang:
+        kwargs["lang"] = str(ocr_lang)
+    try:
+        return run_ocr(str(output), **kwargs)
+    except Exception as exc:
+        return {"engine": "error", "lines": [], "text": "", "error": str(exc)}
+
+
 def postprocess_capture(
     output: Path,
     region: str | None = None,
@@ -1008,6 +1049,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bottom-fraction", type=float, help="Bottom fraction used by --region device-detail. Defaults to 0.34.")
     parser.add_argument("--max-width", type=int, help="Downscale output to this maximum width.")
     parser.add_argument("--max-height", type=int, help="Downscale output to this maximum height.")
+    parser.add_argument("--ocr", action="store_true", help="Also OCR the native-resolution capture (macOS: Apple Vision) and attach recognized text + boxes.")
+    parser.add_argument("--ocr-lang", help="OCR recognition language (default en-US). Only used with --ocr.")
     parser.add_argument("--list", action="store_true", help="List capturable Ableton Live windows without capturing.")
     parser.add_argument("--max-console", action="store_true", help="Capture the Max Console window (Max for Live runtime log) instead of an Ableton Live window.")
     parser.add_argument("--display", type=int, help="With --max-console: capture this whole display (1=main) instead of the window. Needed because the Max Console's surface is unreadable via the per-window API.")
@@ -1026,6 +1069,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_width=args.max_width,
                 max_height=args.max_height,
                 display=args.display,
+                ocr=args.ocr,
+                ocr_lang=args.ocr_lang,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result.get("ok") else 1
@@ -1040,6 +1085,8 @@ def main(argv: list[str] | None = None) -> int:
             bottom_fraction=args.bottom_fraction,
             max_width=args.max_width,
             max_height=args.max_height,
+            ocr=args.ocr,
+            ocr_lang=args.ocr_lang,
         )
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))

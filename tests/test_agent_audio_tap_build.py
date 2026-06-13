@@ -40,3 +40,12 @@ def test_agent_audio_tap_js_has_cross_platform_command_file_default():
     assert "scheduleStartRecording" in source
     assert "startTask.schedule(500)" in source
     assert "/tmp/agent_audio_tap_command.json" not in source
+
+
+def test_agent_audio_tap_js_emits_record_duration_for_capped_capture():
+    # A capped capture sends sfrecord~ "record <ms>" (auto-stop + finalize);
+    # an uncapped one keeps the bare-on (continuous) fallback.
+    source = Path("m4l/agent_audio_tap.js").read_text(encoding="utf-8")
+    assert 'outlet(0, "record", lastDurationMs)' in source
+    assert "outlet(0, 1)" in source  # continuous fallback retained
+    assert "duration_ms" in source
