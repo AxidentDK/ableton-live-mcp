@@ -640,10 +640,23 @@ class AbletonLiveMCP(ControlSurface):
             "udp": params.get("udp", False),
         })
 
+        # Bounded retries so a never-engaging transport (e.g. the audio engine
+        # disabled) can't spin schedule_message forever on Live's main thread.
+        # After the cap we proceed anyway (the capped tap self-terminates; the
+        # caller is told to verify the file isn't silence).
+        try:
+            rec_max_attempts = int(params.get("jump_attempts", 4))
+        except (TypeError, ValueError):
+            rec_max_attempts = 4
+        if rec_max_attempts < 1:
+            rec_max_attempts = 1
+        rec_state = {"attempts": 0}
+
         def position_then_record():
             try:
+                rec_state["attempts"] += 1
                 playing = bool(getattr(song, "is_playing", False))
-                if not playing:
+                if not playing and rec_state["attempts"] < rec_max_attempts:
                     self._start_transport(song)
                     self.schedule_message(0, position_then_record)
                     return
