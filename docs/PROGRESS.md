@@ -35,3 +35,6 @@ Next candidates (not yet filed):
 - **Registered** the server user-scope in Claude Code (`ableton-live` entry in `~\.claude.json`) — future sessions get `live_*` tools natively.
 - **Wrote + pushed** both fixes; opened PRs #14 and #15 upstream.
 - Session lessons now encoded in CLAUDE.md (LOM path grammar, process-name matching, Library.cfg trap).
+
+## 2026-08-08 (later)
+- New standing rule: write topic .md files the moment important info surfaces. First one: docs/WINDOWS-VALIDATION.md — full detail behind the findings backlog (file:line, repro, clean areas, live-bridge usage recipes).
