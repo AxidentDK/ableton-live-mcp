@@ -160,7 +160,7 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
     timeout_control = {"timeout": {"type": "number"}}
     server.add_tool(Tool("live_ping", "Bridge health.", schema(timeout_control), forward("ping")))
     server.add_tool(Tool("live_bridge_status", "Socket-thread status; no Live API/main-thread scheduling.", schema(timeout_control), forward("bridge_status")))
-    server.add_tool(Tool("live_save_set", "Save the current Live Set: OS-level Ctrl/Cmd+S to the Live window, verified via the .als mtime (the LOM has no save API or dirty flag). Refuses an never-saved set (Save As dialog risk). Check saved:true.", schema({
+    server.add_tool(Tool("live_save_set", "Save the Live Set: OS-level Ctrl/Cmd+S verified via .als mtime (LOM has no save API). Refuses a never-saved set (Save As dialog risk). Check saved:true.", schema({
         "timeout": {"type": "number", "description": "Seconds to wait for the set file's mtime to change (default 10)."},
     }), lambda args: save_set(bridge, timeout=float((args or {}).get("timeout") or 10.0))))
 
@@ -192,7 +192,7 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
             "can_redo": bool(bridge.request("eval", {"expr": "song.can_redo"})),
         }
 
-    server.add_tool(Tool("live_undo", "Undo/redo N steps of Live's history (safety net for mutations). Checkpoint pattern: count your own mutations, roll back that many, verify with live_set_summary — GUI edits interleave into the same history. Returns performed/exhausted/can_undo/can_redo.", schema({
+    server.add_tool(Tool("live_undo", "Undo/redo N history steps (mutation safety net). Count your own mutations, roll back that many, verify with live_set_summary; GUI edits interleave. Returns performed/exhausted/can_undo/can_redo.", schema({
         "steps": {"type": "integer", "minimum": 1, "description": "History steps to move (default 1)."},
         "redo": {"type": "boolean", "description": "Move forward (redo) instead of back."},
     }), live_undo))
