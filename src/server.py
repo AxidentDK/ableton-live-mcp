@@ -95,7 +95,7 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
     timeout_control = {"timeout": {"type": "number"}}
     server.add_tool(Tool("live_ping", "Bridge health.", schema(timeout_control), forward("ping")))
     server.add_tool(Tool("live_bridge_status", "Socket-thread status; no Live API/main-thread scheduling.", schema(timeout_control), forward("bridge_status")))
-    server.add_tool(Tool("live_save_set", "Save the current Live Set: OS-level Ctrl/Cmd+S to the Live window, verified via the .als mtime (the LOM has no save API or dirty flag). Refuses an never-saved set (Save As dialog risk). Check saved:true.", schema({
+    server.add_tool(Tool("live_save_set", "Save the Live Set: OS-level Ctrl/Cmd+S verified via .als mtime (LOM has no save API). Refuses a never-saved set (Save As dialog risk). Check saved:true.", schema({
         "timeout": {"type": "number", "description": "Seconds to wait for the set file's mtime to change (default 10)."},
     }), lambda args: save_set(bridge, timeout=float((args or {}).get("timeout") or 10.0))))
     response_controls = {
