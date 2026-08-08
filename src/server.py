@@ -12,6 +12,7 @@ from ableton_paths import state_dir
 from bridge import AbletonBridgeClient, BridgeConfig
 from agent_m4l import build_device, command_file as agent_m4l_command_file, device_name as agent_m4l_device_name, infer_device_bounds, normalize_role, slugify, status_file as agent_m4l_status_file, udp_port as agent_m4l_udp_port, write_webui, write_webui_asset_files, write_webui_assets
 from mcp_stdio import StdioMcpServer, Tool
+from export_set import export_set
 from save_set import save_set
 from similar_sounds import find_similar_sounds
 from visual_capture import capture_ableton_window, capture_max_console_window
@@ -271,6 +272,12 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         "velocity": {"type": "integer"},
         "spread_ms": {"type": "number", "description": "Stagger between pitches (0=chord, >0=arp)."},
     }), live_play_notes))
+    server.add_tool(Tool("live_export", "Render the arrangement to WAV by driving the export dialog (no export API exists). Uses the loop brace or start_beats+length_beats as the range and Live's LAST-USED format settings. Refuses to overwrite. Check exported:true.", schema({
+        "output_path": {"type": "string", "description": "Target .wav (must not exist)."},
+        "start_beats": {"type": "number"},
+        "length_beats": {"type": "number"},
+        "timeout": {"type": "number", "description": "Seconds to wait for the render (default 240)."},
+    }, ["output_path"]), lambda args: export_set(bridge, (args or {}).get("output_path"), start_beats=(args or {}).get("start_beats"), length_beats=(args or {}).get("length_beats"), timeout=float((args or {}).get("timeout") or 240.0))))
     response_controls = {
         "detail": {"type": "boolean"},
         "max_items": {"type": "integer"},

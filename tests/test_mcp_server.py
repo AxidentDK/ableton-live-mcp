@@ -2633,7 +2633,7 @@ def test_tool_list_stays_compact():
     response = server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
     payload = json.dumps(response, separators=(",", ":"))
     # Re-baselined as tools landed (see history); keep new tools terse.
-    assert len(payload) < 22600
+    assert len(payload) < 23200
     live_eval = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_eval")
     assert "live_exec" in live_eval["description"]
     assert "duplicate session clips" not in live_eval["description"].lower()
