@@ -2632,11 +2632,10 @@ def test_tool_list_stays_compact():
     server = make_server(FakeBridge())
     response = server.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
     payload = json.dumps(response, separators=(",", ":"))
-    # Re-baselined when the tap gained duration_ms/bars (deterministic stop), the
-    # short OCR notes landed on the capture-tool descriptions, and play_from/
-    # play_loop (extra transport schema) + live_record_track_to_wav (a full-schema
-    # turnkey tool) landed; keep new tools terse so this stays meaningful.
-    assert len(payload) < 21000
+    # Re-baselined as tools landed: tap duration_ms/bars, OCR notes, play_from/
+    # play_loop + record_track_to_wav, save_set/undo, and live_analyze (full
+    # schema). Keep new tools terse so this stays meaningful.
+    assert len(payload) < 21800
     live_eval = next(tool for tool in response["result"]["tools"] if tool["name"] == "live_eval")
     assert "live_exec" in live_eval["description"]
     assert "duplicate session clips" not in live_eval["description"].lower()

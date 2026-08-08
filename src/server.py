@@ -196,6 +196,37 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         "steps": {"type": "integer", "minimum": 1, "description": "History steps to move (default 1)."},
         "redo": {"type": "boolean", "description": "Move forward (redo) instead of back."},
     }), live_undo))
+
+    def live_analyze(args):
+        from audio_analysis import analyze_wav
+
+        params = dict(args or {})
+        path = params.get("path")
+        duration_ms = params.get("duration_ms")
+        bars = params.get("bars")
+        if path and (duration_ms or bars):
+            raise ValueError("pass either path (analyze an existing wav) or duration_ms/bars (capture first), not both")
+        if not path:
+            if not (duration_ms or bars):
+                raise ValueError("live_analyze needs a path to analyze, or duration_ms/bars to capture")
+            capture_path = str(params.get("capture_path") or (state_dir() / "live_analyze_capture.wav"))
+            start = {"command": "start", "path": capture_path, "udp": True}
+            if duration_ms is not None:
+                start["duration_ms"] = duration_ms
+            else:
+                start["bars"] = bars
+            started = bridge.request("agent_audio_tap", start)
+            wait_s = float(started.get("duration_ms") or duration_ms or 0.0) / 1000.0 + 2.0
+            time.sleep(wait_s)
+            path = capture_path
+        return analyze_wav(path)
+
+    server.add_tool(Tool("live_analyze", "Analyze a wav (path) or tap-capture first (duration_ms/bars; AgentAudioTap + playback running): BS.1770 integrated LUFS, peak dBFS, band energies, dominant Hz. Needs numpy ([analyze] extra).", schema({
+        "path": {"type": "string", "description": "Existing wav to analyze (skips capture)."},
+        "duration_ms": {"type": "number", "description": "Capture this many ms from AgentAudioTap first."},
+        "bars": {"type": "number", "description": "Capture this many bars (project tempo) first."},
+        "capture_path": {"type": "string", "description": "Where to write the capture (default state dir)."},
+    }), live_analyze))
     response_controls = {
         "detail": {"type": "boolean"},
         "max_items": {"type": "integer"},
