@@ -7,6 +7,16 @@ var lastPath = "";
 var lastDurationMs = 0;
 var pendingDurationMs = 0;   // stash for the deferred start (Task.arguments proved unreliable in M4L [js])
 var commandFile = jsarguments.length > 1 ? String(jsarguments[1]) : "agent_audio_tap_command.json";
+// Liveness handshake: every report() also writes a status FILE next to the
+// command file, so a client can prove the device instance is actually alive
+// (a stale instance — observed after Live's "Collect All and Save" on Windows,
+// 2026-08-08 — silently ignores both the command file and UDP, and a freshly
+// loaded instance records zeros until Max finishes wiring the audio graph).
+var statusFile = commandFile.replace(/command(\.json)?$/, "status$1");
+if (statusFile === commandFile) {
+    statusFile = commandFile + ".status";
+}
+var statusSeq = 0;
 var lastCommandId = "";
 var pollTask = null;
 var startTask = null;
@@ -14,6 +24,7 @@ var stopTask = null;
 
 function loadbang() {
     start_polling();
+    report("loaded");
 }
 
 function start_polling() {
@@ -197,7 +208,8 @@ function stopRecording() {
 }
 
 function report(eventName) {
-    outlet(1, JSON.stringify({
+    statusSeq += 1;
+    var payload = JSON.stringify({
         event: eventName,
         recording: isRecording,
         path: lastPath,
@@ -208,6 +220,31 @@ function report(eventName) {
         // unwired (numoutlets 0), so the JS cannot observe the finalized file.
         // Wiring sfrecord~'s sync outlet back into this [js] is a follow-up if a
         // measured completion signal is needed.
-        duration_ms: lastDurationMs
-    }));
+        duration_ms: lastDurationMs,
+        // Handshake fields: last_command_id lets a client match a status write to
+        // the exact command it sent; seq distinguishes fresh writes even when the
+        // id repeats (e.g. loadbang before any command).
+        last_command_id: lastCommandId,
+        seq: statusSeq
+    });
+    outlet(1, payload);
+    writeStatusFile(payload);
+}
+
+function writeStatusFile(payload) {
+    // Overwrite-in-place; eof trim drops any longer stale tail so the file is
+    // always exactly one JSON object.
+    try {
+        var file = new File(statusFile, "write");
+        if (!file.isopen) {
+            outlet(2, "error", "status_file_unwritable", statusFile);
+            return;
+        }
+        file.position = 0;
+        file.writestring(payload);
+        file.eof = file.position;
+        file.close();
+    } catch (err) {
+        outlet(2, "error", "status_file_write_failed", String(err));
+    }
 }
