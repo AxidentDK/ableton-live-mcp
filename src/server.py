@@ -227,6 +227,50 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
         "bars": {"type": "number", "description": "Capture this many bars (project tempo) first."},
         "capture_path": {"type": "string", "description": "Where to write the capture (default state dir)."},
     }), live_analyze))
+
+    def live_play_notes(args):
+        # Real-time audition: schedule notes through an AgentM4L midi_effect
+        # device's makenote->midiout chain, driving whatever instrument follows
+        # it on the track — no clips created, nothing to undo. The device polls
+        # its command file (~100 ms), so the server writes it directly; no
+        # bridge round-trip or remote-script support needed.
+        params = dict(args or {})
+        instance_id = slugify(str(params.get("instance_id") or "audition"))
+        notes = params.get("notes")
+        if not notes and params.get("pitches"):
+            duration = float(params.get("duration_ms") or 800)
+            velocity = int(params.get("velocity") or 100)
+            spread = float(params.get("spread_ms") or 0)
+            notes = [
+                {"pitch": int(p), "velocity": velocity, "duration_ms": duration, "at_ms": i * spread}
+                for i, p in enumerate(params["pitches"])
+            ]
+        if not notes:
+            raise ValueError("live_play_notes needs notes[] or pitches[]")
+        payload = {
+            "id": "play-notes-%f" % time.time(),
+            "command": "play_notes",
+            "instance_id": instance_id,
+            "notes": notes,
+        }
+        path = agent_m4l_command_file(instance_id)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+        return {
+            "written": path,
+            "instance_id": instance_id,
+            "notes": len(notes),
+            "hint": "Needs an AgentM4L midi_effect device (this instance_id) BEFORE the instrument on the target track; it polls its command file every ~100 ms.",
+        }
+
+    server.add_tool(Tool("live_play_notes", "Audition notes through a track's instrument in real time (no clips): schedules notes via an AgentM4L midi_effect device's makenote->midiout chain. Pass notes[{pitch,velocity,duration_ms,at_ms}] or pitches[]+duration_ms/spread_ms.", schema({
+        "instance_id": {"type": "string", "description": "AgentM4L instance id (default 'audition')."},
+        "notes": {"type": "array", "items": {"type": "object"}, "description": "Explicit note events."},
+        "pitches": {"type": "array", "items": {"type": "integer"}, "description": "Chord/arp shorthand."},
+        "duration_ms": {"type": "number"},
+        "velocity": {"type": "integer"},
+        "spread_ms": {"type": "number", "description": "Stagger between pitches (0=chord, >0=arp)."},
+    }), live_play_notes))
     response_controls = {
         "detail": {"type": "boolean"},
         "max_items": {"type": "integer"},
