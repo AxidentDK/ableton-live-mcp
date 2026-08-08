@@ -61,9 +61,14 @@ def test_midi_effect_patch_wires_audition_chain():
     patch = agent_m4l.make_host_patch("midi_effect", "aud")
     boxes = {box["box"]["id"]: box["box"] for box in patch["patcher"]["boxes"]}
     assert boxes["audition-makenote"]["text"].startswith("makenote")
+    assert boxes["audition-pack"]["text"] == "pack 0 0"
     assert boxes["audition-midiformat"]["text"] == "midiformat"
     lines = [entry["patchline"] for entry in patch["patcher"]["lines"]]
     assert {"source": ["js", 3], "destination": ["audition-makenote", 0]} in lines
-    assert {"source": ["audition-makenote", 0], "destination": ["audition-midiformat", 0]} in lines
-    assert {"source": ["audition-makenote", 1], "destination": ["audition-midiformat", 1]} in lines
+    # midiformat's note inlet needs a [pitch velocity] list via pack — its inlet 1
+    # is poly pressure, and wiring velocity there yields velocity-0 note-ons.
+    assert {"source": ["audition-makenote", 0], "destination": ["audition-pack", 0]} in lines
+    assert {"source": ["audition-makenote", 1], "destination": ["audition-pack", 1]} in lines
+    assert {"source": ["audition-pack", 0], "destination": ["audition-midiformat", 0]} in lines
     assert {"source": ["audition-midiformat", 0], "destination": ["midiout", 0]} in lines
+    assert {"source": ["audition-makenote", 1], "destination": ["audition-midiformat", 1]} not in lines
