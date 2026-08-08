@@ -622,6 +622,20 @@ def test_run_ocr_drops_lines_below_min_confidence(tmp_path):
     assert result["text"] == ""
 
 
+def _macos_ableton_window():
+    # Minimal verified-Ableton window for OCR-path tests (platform value is
+    # irrelevant to the OCR flow itself; run_ocr is monkeypatched).
+    return WindowInfo(
+        platform="Darwin",
+        id=100,
+        title="Live Set",
+        owner="Live",
+        process_path="/Applications/Ableton Live Suite.app/Contents/MacOS/Live",
+        bundle_id="com.ableton.live",
+        bounds={"x": 0, "y": 0, "width": 400, "height": 300},
+    )
+
+
 def test_run_ocr_runs_on_full_res_before_downscale(tmp_path, monkeypatch):
     # capture_ableton_window must OCR the native-resolution file BEFORE
     # postprocess downscales it in place. We assert run_capture_ocr sees the

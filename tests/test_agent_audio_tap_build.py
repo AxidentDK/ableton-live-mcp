@@ -43,10 +43,13 @@ def test_agent_audio_tap_js_has_cross_platform_command_file_default():
     assert "/tmp/agent_audio_tap_command.json" not in source
 
 
-def test_agent_audio_tap_js_emits_record_duration_for_capped_capture():
-    # A capped capture sends sfrecord~ "record <ms>" (auto-stop + finalize);
-    # an uncapped one keeps the bare-on (continuous) fallback.
+def test_agent_audio_tap_js_caps_capture_via_scheduled_stop():
+    # A capped capture starts continuously and schedules an explicit stop after
+    # the duration: sfrecord~ "record <ms>" does NOT self-terminate in Live 12.4
+    # (verified in-Live 2026-06-13), so the js must never rely on it. The
+    # explicit outlet(0, 0) both stops and finalizes the WAV header.
     source = Path("m4l/agent_audio_tap.js").read_text(encoding="utf-8")
-    assert 'outlet(0, "record", lastDurationMs)' in source
-    assert "outlet(0, 1)" in source  # continuous fallback retained
+    assert 'outlet(0, "record"' not in source          # broken auto-stop path banned
+    assert "outlet(0, 1)" in source                    # continuous start
+    assert "stopTask" in source and "timedStop" in source
     assert "duration_ms" in source
