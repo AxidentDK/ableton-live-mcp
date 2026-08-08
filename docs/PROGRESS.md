@@ -24,6 +24,17 @@ Next candidates (not yet filed):
 7. Watch item: `write_webui()` passes a raw backslash `html_path` to jweb `readfile` — the one path bypassing `max_arg()`; probably self-heals via the `file:///` fallback; verify once with a live device.
 - Known design caveats (not bugs): bridge socket has no auth (any local process can eval Python inside Live); generated M4L devices hard-coded to `m4l/generated/` inside the checkout.
 
+New from the 2026-08-08 live music session (first real-world use, all confirmed against Live 12.4.3):
+8. **AgentAudioTap goes deaf after Live's "Collect All and Save"** — existing instance stops creating files on `open`/`start` (UDP delivered, `sent:true`, no file ever appears). Workaround: delete the device from Main + rerun `live_agent_audio_tap_setup`. Suspect collect-and-save re-homes the device to the project's collected copy, killing the js `Task`/`udpreceive`. Fix candidate: setup (or the tap tool) should do a status round-trip and auto-reload a dead instance instead of trusting `devices:["AgentAudioTap"]`.
+9. **Fresh tap instance records pure zeros if started too soon after load** — recorded a valid-size all-silence wav while `master_track.output_meter_level` showed ~0.86 signal. Waiting ~8 s between setup and `start` fixed it. Fix candidate: js `loadbang` should emit a ready status and setup should block on it rather than returning immediately.
+10. **`live_transport` `play {time}` response reports the pre-seek time** — observed `play time=88` → `"time":164.8` and `play time=0` → status 139.5 moments later; seek-while-playing reliability unclear. Workaround: `live_exec` stop → `current_song_time = x` → `start_playing()`. Fix candidate: `_rpc_transport` re-reads time after `_seek_song` (settle), or seeks via stop/set/start when playing.
+11. **`clip_notes` appends `{"truncated": true, "omitted": N}` INSIDE the notes array** (cap ~200/response) — every client must special-case a non-note dict in a notes list, and the info duplicates the top-level `truncated` flag. Move the marker to the top level.
+12. Agent-guidance gap: tap captures happily record past the arrangement end (transport keeps running into silent timeline — burned two captures on this). Tap status or setup could expose song length / last-clip end so agents can bound captures.
+
+## 2026-08-08 — first real-world music session (menu loop for Unforeseen Consequences)
+- Full production session driven over the bridge against Kim's live set: `set_summary`/`clip_notes` analysis, `clip_add_notes` (628-note payload in one call — fine), `clip_duplicate_to_arrangement`, `browser_search`/`browser_load` incl. **VST loading via roots:['plugins']** (Arturia ARP 2600 V3), `clip_envelope` automation (Auto Filter sweep), `device_parameters`/`parameter_set` on stock + VST devices, AgentAudioTap master captures + offline BS.1770 LUFS measurement. Everything worked on Windows except the new backlog items 8–12 above.
+- Also proven: offline-sample rescue workflow (read .als gzip XML for original paths → relative `../` relink trick), and the tap→numpy analysis loop (K-weighted LUFS, vibrato measurement at ±11 cents / 1.84 Hz).
+
 ## 2026-08-08
 - Created `kim/main` integration branch (both fix branches merged) + this documentation. Local checkout and the registered MCP server now run all fixes.
 
