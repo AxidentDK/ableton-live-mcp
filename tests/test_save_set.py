@@ -53,7 +53,7 @@ def test_save_set_reports_unobserved_save(tmp_path, monkeypatch):
     result = save_set(FileBridge(als), timeout=1.0, poll_interval=0.05)
     assert result["saved"] is False
     assert result["error"] == "save_not_observed"
-    assert "modal" in result["hint"]
+    assert "no unsaved changes" in result["hint"]
 
 
 def test_save_set_raises_on_missing_file(tmp_path):

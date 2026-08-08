@@ -65,10 +65,10 @@ def save_set(bridge, timeout: float = 10.0, poll_interval: float = 0.25) -> dict
         "error": "save_not_observed",
         "hint": (
             "Sent the save keystroke but the set file's mtime did not change within "
-            "%.1fs. Live may be showing a modal dialog, may not have had keyboard "
-            "focus, or the set may have had no unsaved changes (Live still rewrites "
-            "the file on Ctrl+S, so an unchanged mtime usually means the keystroke "
-            "did not arrive). Check the Live window." % float(timeout)
+            "%.1fs. Most often the set simply had no unsaved changes — Live skips the "
+            "rewrite entirely when the set is not dirty (verified in-Live 2026-08-08), "
+            "so this is usually harmless. Otherwise: a modal dialog may be open or the "
+            "window may not have taken focus. Check the Live window." % float(timeout)
         ),
     }
 
