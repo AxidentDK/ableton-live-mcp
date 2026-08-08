@@ -426,10 +426,19 @@ def make_host_patch(role: str, instance_id: str, title: str | None = None, devic
             _box("midiin", "newobj", "midiin", HOST_COL_0, 280.0),
             _box("midi-wake-prepend", "newobj", "prepend __midi_wake", HOST_COL_0, 308.0),
             _box("midiout", "newobj", "midiout", HOST_COL_0, 336.0),
+            # Note audition path: [js] outlet 3 emits "pitch velocity duration_ms"
+            # lists; makenote pairs the note-offs, midiformat renders raw MIDI for
+            # midiout so the notes drive whatever instrument follows on the track.
+            _box("audition-makenote", "newobj", "makenote 100 500", HOST_COL_1, 280.0),
+            _box("audition-midiformat", "newobj", "midiformat", HOST_COL_1, 308.0),
         ]
         lines += [
             _line("midiin", 0, "midi-wake-prepend", 0),
             _line("midi-wake-prepend", 0, "js", 0),
+            _line("js", 3, "audition-makenote", 0),
+            _line("audition-makenote", 0, "audition-midiformat", 0),
+            _line("audition-makenote", 1, "audition-midiformat", 1),
+            _line("audition-midiformat", 0, "midiout", 0),
         ]
     return {
         "patcher": {
