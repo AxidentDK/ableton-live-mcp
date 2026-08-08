@@ -123,7 +123,7 @@ def make_server(client: AbletonBridgeClient | None = None) -> StdioMcpServer:
             "can_redo": bool(bridge.request("eval", {"expr": "song.can_redo"})),
         }
 
-    server.add_tool(Tool("live_undo", "Undo/redo N steps of Live's history (safety net for mutations). Checkpoint pattern: count your own mutations, roll back that many, verify with live_set_summary — GUI edits interleave into the same history. Returns performed/exhausted/can_undo/can_redo.", schema({
+    server.add_tool(Tool("live_undo", "Undo/redo N history steps (mutation safety net). Count your own mutations, roll back that many, verify with live_set_summary; GUI edits interleave. Returns performed/exhausted/can_undo/can_redo.", schema({
         "steps": {"type": "integer", "minimum": 1, "description": "History steps to move (default 1)."},
         "redo": {"type": "boolean", "description": "Move forward (redo) instead of back."},
     }), live_undo))
