@@ -7,3 +7,8 @@ analysis/
 m4l/generated/
 vocal_hooks/
 cowbell_loops/
+
+# Fork-local, never publish: personal machine facts + session dev log.
+# (Kept on disk to guide the agent; just never tracked/pushed.)
+CLAUDE.md
+docs/PROGRESS.md
